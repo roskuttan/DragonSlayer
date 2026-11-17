@@ -141,8 +141,8 @@ impl Scenario {
 
     fn fans_text(self) -> &'static str {
         match self {
-            Self::Silent => "Silent fans",
-            Self::Balanced | Self::Performance => "Auto fans",
+            Self::Silent => "Silent fan",
+            Self::Balanced | Self::Performance => "Auto fan",
             Self::Extreme => "Cooler Boost",
         }
     }
@@ -350,7 +350,7 @@ fn apply<B: EcBackend>(ctl: &mut Controller<B>, cmd: Cmd, settings: &mut Setting
             if res.is_ok() {
                 settings.fan = Some(m);
             }
-            (format!("Fans set to {}", fan_name(m)), res)
+            (format!("Fan set to {}", fan_name(m)), res)
         }
         Cmd::Curve(c) => {
             let res = r(ctl.set_fan_profile(FanMode::Advanced, Some(c)));
@@ -424,7 +424,7 @@ fn apply<B: EcBackend>(ctl: &mut Controller<B>, cmd: Cmd, settings: &mut Setting
         }
         Cmd::BatteryQuiet(on) => {
             settings.battery_quiet = on;
-            (format!("Quiet fans on battery {}", if on { "on" } else { "off" }), Ok(()))
+            (format!("Quiet fan on battery {}", if on { "on" } else { "off" }), Ok(()))
         }
         Cmd::BatteryKbdOff(on) => {
             settings.battery_kbd_off = on;
@@ -709,7 +709,7 @@ struct TrayMenu {
 fn make_tray(ctx: &egui::Context) -> Option<(TrayIcon, TrayMenu, mpsc::Receiver<TrayMsg>)> {
     let open = MenuItem::new("Open DragonSlayer", true, None);
     let boost = CheckMenuItem::new("Cooler Boost", true, false, None);
-    let silent = CheckMenuItem::new("Silent fans", true, false, None);
+    let silent = CheckMenuItem::new("Silent fan", true, false, None);
     let quit = MenuItem::new("Quit", true, None);
     let menu = Menu::new();
     for item in [&open as &dyn tray_icon::menu::IsMenuItem, &PredefinedMenuItem::separator(), &boost, &silent, &PredefinedMenuItem::separator(), &quit] {
@@ -748,6 +748,14 @@ fn make_tray(ctx: &egui::Context) -> Option<(TrayIcon, TrayMenu, mpsc::Receiver<
 struct App {
     /// set when another launch of the app asks this copy to show itself
     show_req: Arc<AtomicBool>,
+    /// window hidden in the tray: no animation frames then
+    hidden: bool,
+    /// Dashboard fan: current angle (rad)
+    fan_angle: f32,
+    /// DS_FRAME_LOG diagnostics: frames, summed CPU seconds, window start
+    frame_log: (u32, f32, f64),
+    /// when the current tab was opened (for its entrance animation)
+    tab_since: f64,
     shared: Arc<Mutex<Shared>>,
     tx: mpsc::Sender<Cmd>,
     mock: bool,
@@ -814,6 +822,10 @@ impl App {
             draft: None,
             winkey_ok,
             show_req: Arc::new(AtomicBool::new(false)),
+            hidden: false,
+            fan_angle: 0.0,
+            frame_log: (0, 0.0, 0.0),
+            tab_since: -10.0,
         }
     }
 
@@ -853,7 +865,14 @@ impl App {
 
 fn card(p: &Painter, r: Rect) {
     p.rect_filled(r, RADIUS, CARD);
-    p.rect_stroke(r, RADIUS, Stroke::new(1.0, BORDER), StrokeKind::Inside);
+    // the card under the pointer lights up a little
+    let ctx = p.ctx();
+    let over = ctx.pointer_hover_pos().is_some_and(|m| r.contains(m));
+    let h = ctx.animate_bool_with_time(Id::new(("card", r.left() as i32, r.width() as i32, r.height() as i32)), over, 0.2);
+    if h > 0.0 {
+        vgradient(p, Rect::from_min_max(r.min + vec2(RADIUS, 1.0), pos2(r.right() - RADIUS, r.top() + 46.0)), Color32::from_white_alpha((h * 7.0) as u8), Color32::TRANSPARENT);
+    }
+    p.rect_stroke(r, RADIUS, Stroke::new(1.0, mix(BORDER, Color32::from_rgb(62, 66, 80), h)), StrokeKind::Inside);
 }
 
 fn card_title(p: &Painter, r: Rect, title: &str) {
@@ -904,62 +923,172 @@ fn arc(p: &Painter, c: Pos2, r: f32, w: f32, a0: f32, a1: f32, color: impl Fn(f3
 const A0: f32 = 0.75 * PI; // 135°, bottom-left
 const SWEEP: f32 = 1.5 * PI; // 270°
 
-fn gauge(ui: &Ui, r: Rect, id: Id, name: &str, accent: Color32, temp: u8, fan: u8) {
+/// Temperature gauge sized to its column. `now` (seconds) drives the
+/// animation: a pulse ring on the arc's tip (faster and wider when hot) and
+/// a shine that runs along the filled arc. `target` is the fan speed this
+/// sensor's curve asks for, shown underneath.
+#[allow(clippy::too_many_arguments)]
+fn gauge(ui: &Ui, r: Rect, id: Id, name: &str, accent: Color32, temp: u8, target: u8, now: f64) {
     let p = ui.painter();
     let shown = ui.ctx().animate_value_with_time(id, temp as f32, 0.6);
-    let fan_shown = ui.ctx().animate_value_with_time(id.with("fan"), fan as f32, 0.6);
+    let target_shown = ui.ctx().animate_value_with_time(id.with("target"), target as f32, 0.6);
     let f = temp_frac(shown);
 
-    let c = pos2(r.center().x, r.top() + 86.0);
-    let (rad, w) = (70.0, 11.0);
+    let rad = ((r.width() - 40.0) / 2.0).min(70.0);
+    let k = rad / 70.0; // scale fonts and offsets with the gauge
+    let w = 11.0 * k;
+    let c = pos2(r.center().x, r.top() + rad + 18.0);
     let at = |a: f32| (a - A0) / SWEEP;
 
     arc(p, c, rad, w, A0, A0 + SWEEP, |_| TRACK);
     if f > 0.0 {
         let a1 = A0 + SWEEP * f;
-        arc(p, c, rad, w * 1.9, A0, a1, |a| heat(at(a)).gamma_multiply(0.07)); // glow
+        // glow under the arc, breathing a little when hot
+        let hot = ((shown - 75.0) / 20.0).clamp(0.0, 1.0);
+        let breathe = 0.07 + hot * 0.06 * (0.5 + 0.5 * (now as f32 * 3.0).sin());
+        arc(p, c, rad, w * 1.9, A0, a1, |a| heat(at(a)).gamma_multiply(breathe));
         arc(p, c, rad, w, A0, a1, |a| heat(at(a)));
+        // shine: a soft white highlight sliding from the start to the tip
+        let span = a1 - A0;
+        let pos = A0 + span * (now as f32 / 2.6).fract();
+        let half = 0.32;
+        let (s0, s1) = ((pos - half).max(A0), (pos + half).min(a1));
+        if s1 > s0 {
+            arc(p, c, rad, w * 0.55, s0, s1, |a| {
+                let d = 1.0 - ((a - pos) / half).abs();
+                Color32::from_white_alpha((d * d * 70.0) as u8)
+            });
+        }
         let cap = |a: f32| c + vec2(a.cos(), a.sin()) * rad;
         p.circle_filled(cap(A0), w / 2.0, heat(0.0));
-        p.circle_filled(cap(a1), w / 2.0 + 2.5, heat(f));
-        p.circle_filled(cap(a1), 2.5, CARD);
+        // tip: an expanding, fading pulse ring, faster when hot
+        let rate = 0.55 + 1.1 * hot;
+        let ph = (now as f32 * rate).fract();
+        let tip = cap(a1);
+        p.circle_stroke(tip, w / 2.0 + 2.5 + ph * 9.0 * k, Stroke::new(2.0, heat(f).gamma_multiply((1.0 - ph) * 0.55)));
+        p.circle_filled(tip, w / 2.0 + 2.5, heat(f));
+        p.circle_filled(tip, 2.5, CARD);
     }
 
     // scale labels
-    let lbl = |a: f32| c + vec2(a.cos(), a.sin()) * (rad + 4.0) + vec2(0.0, 16.0);
+    let lbl = |a: f32| c + vec2(a.cos(), a.sin()) * (rad + 4.0) + vec2(0.0, 16.0 * k);
     p.text(lbl(A0), Align2::CENTER_CENTER, "30°", regular(11.0), FAINT);
     p.text(lbl(A0 + SWEEP), Align2::CENTER_CENTER, "100°", regular(11.0), FAINT);
 
     // centre
-    p.circle_filled(c + vec2(-16.0, -34.0), 3.5, accent);
-    p.text(c + vec2(-8.0, -34.0), Align2::LEFT_CENTER, name, semibold(13.0), DIM);
-    let num = p.layout_no_wrap(format!("{}", shown.round() as i32), bold(44.0), TEXT);
-    let unit = p.layout_no_wrap("°C".into(), semibold(15.0), DIM);
+    p.circle_filled(c + vec2(-16.0, -34.0 * k), 3.5, accent);
+    p.text(c + vec2(-8.0, -34.0 * k), Align2::LEFT_CENTER, name, semibold(13.0), DIM);
+    let num = p.layout_no_wrap(format!("{}", shown.round() as i32), bold(44.0 * k), TEXT);
+    let unit = p.layout_no_wrap("°C".into(), semibold(15.0 * k.max(0.85)), DIM);
     let total = num.size().x + 2.0 + unit.size().x;
     let x0 = c.x - total / 2.0;
     let ny = c.y - num.size().y / 2.0 + 2.0;
     let num_w = num.size().x;
     p.galley(pos2(x0, ny), num, TEXT);
-    p.galley(pos2(x0 + num_w + 2.0, ny + 9.0), unit, DIM);
+    p.galley(pos2(x0 + num_w + 2.0, ny + 9.0 * k), unit, DIM);
     let word = match shown {
         t if t < 60.0 => "Cool",
         t if t < 80.0 => "Warm",
         _ => "Hot",
     };
-    p.text(c + vec2(0.0, 30.0), Align2::CENTER_CENTER, word, semibold(12.0), heat(f));
+    p.text(c + vec2(0.0, 30.0 * k), Align2::CENTER_CENTER, word, semibold(12.0), heat(f));
 
-    // fan bar
-    let y = r.top() + 176.0;
-    let bar = Rect::from_min_max(pos2(r.left() + 22.0, y + 20.0), pos2(r.right() - 22.0, y + 26.0));
-    p.text(pos2(bar.left(), y), Align2::LEFT_TOP, "FAN", semibold(11.0), FAINT);
-    p.text(pos2(bar.right(), y), Align2::RIGHT_TOP, format!("{}%", fan_shown.round() as i32), semibold(12.0), TEXT);
-    p.rect_filled(bar, 3.0, TRACK);
-    let fw = bar.width() * (fan_shown / 100.0).clamp(0.0, 1.0);
+    // what this sensor's curve asks the (one) fan for
+    let y = c.y + rad + 34.0;
+    let bar = Rect::from_min_max(pos2(r.left() + 22.0, y + 18.0), pos2(r.right() - 22.0, y + 23.0));
+    p.text(pos2(bar.left(), y), Align2::LEFT_TOP, "FAN TARGET", semibold(10.5), FAINT);
+    p.text(pos2(bar.right(), y), Align2::RIGHT_TOP, format!("{}%", target_shown.round() as i32), semibold(12.0), TEXT);
+    p.rect_filled(bar, 2.5, TRACK);
+    let fw = bar.width() * (target_shown / 100.0).clamp(0.0, 1.0);
     if fw > 1.0 {
-        let fill = Rect::from_min_size(bar.min, vec2(fw.max(6.0), bar.height()));
-        p.rect_filled(fill.expand(2.0), 5.0, accent.gamma_multiply(0.15));
-        p.rect_filled(fill, 3.0, accent);
+        let fill = Rect::from_min_size(bar.min, vec2(fw.max(5.0), bar.height()));
+        p.rect_filled(fill.expand(2.0), 4.0, accent.gamma_multiply(0.15));
+        p.rect_filled(fill, 2.5, accent);
     }
+}
+
+/// Highest fan speed seen on this laptop (Cooler Boost), for the speed ring.
+const MAX_RPM: f32 = 6900.0;
+/// The on-screen fan turns exactly this many times slower than the real one.
+const SLOW_MO: f32 = 60.0;
+
+/// The laptop's one fan: a housing, seven curved blades turned by `angle`,
+/// motion blur from `spin` (radians per frame), and a speed ring around it
+/// that fills and warms with the RPM. Boost turns the ring red and pulsing.
+#[allow(clippy::too_many_arguments)]
+fn fan_art(p: &Painter, c: Pos2, rad: f32, angle: f32, spin: f32, rpm: f32, boost: bool, now: f64) {
+    use std::f32::consts::TAU;
+    let speed = (rpm / MAX_RPM).clamp(0.0, 1.0);
+
+    // speed ring: track, glow and fill from 12 o'clock, blue -> red
+    let ring_r = rad + 10.0;
+    let a_top = -PI / 2.0;
+    arc(p, c, ring_r, 4.0, 0.0, TAU, |_| TRACK);
+    if speed > 0.0 {
+        let a1 = a_top + TAU * speed;
+        let col = |a: f32| {
+            let t = ((a - a_top) / TAU).clamp(0.0, 1.0);
+            if boost { ACCENT } else { mix(GPU_C, HOT, t) }
+        };
+        let glow = if boost { 0.16 + 0.10 * (now as f32 * 4.0).sin() } else { 0.12 };
+        arc(p, c, ring_r, 13.0, a_top, a1, |a| col(a).gamma_multiply(glow));
+        arc(p, c, ring_r, 4.0, a_top, a1, col);
+        p.circle_filled(c + vec2(a1.cos(), a1.sin()) * ring_r, 3.5, col(a1));
+    }
+
+    // housing
+    p.circle_filled(c, rad + 3.0, Color32::from_rgb(12, 13, 18));
+    p.circle_stroke(c, rad + 3.0, Stroke::new(1.5, Color32::from_white_alpha(14)));
+    p.circle_stroke(c, rad - 1.0, Stroke::new(1.0, Color32::from_black_alpha(120)));
+
+    // blades: ribbons from hub to tip, wider and swept forward at the tip
+    let hub = rad * 0.27;
+    let tip = rad * 0.92;
+    let blades = 7;
+    let blade = |p: &Painter, base: f32, alpha: f32| {
+        let mut m = Mesh::default();
+        let steps = 12;
+        let mut edge = Vec::with_capacity(steps + 1);
+        for i in 0..=steps {
+            let t = i as f32 / steps as f32;
+            let r = hub + (tip - hub) * t;
+            let lead = base + 0.55 * t.powf(1.25);
+            let trail = lead - (0.30 + 0.22 * t);
+            let shade = mix(Color32::from_rgb(52, 56, 68), Color32::from_rgb(104, 110, 126), t);
+            let col = shade.gamma_multiply(alpha);
+            m.colored_vertex(c + vec2(lead.cos(), lead.sin()) * r, col);
+            m.colored_vertex(c + vec2(trail.cos(), trail.sin()) * r, col.gamma_multiply(0.75));
+            edge.push(c + vec2(lead.cos(), lead.sin()) * r);
+            if i > 0 {
+                let b = (2 * i) as u32;
+                m.add_triangle(b - 2, b - 1, b);
+                m.add_triangle(b - 1, b + 1, b);
+            }
+        }
+        p.add(Shape::mesh(m));
+        // a thin highlight on the leading edge
+        p.add(Shape::line(edge, Stroke::new(1.2, Color32::from_white_alpha((45.0 * alpha) as u8))));
+    };
+    // motion blur: fading copies trailing behind, then the blades themselves
+    let ghosts = if spin > 0.01 { 3 } else { 0 };
+    for g in (1..=ghosts).rev() {
+        let back = spin * g as f32 / ghosts as f32;
+        for k in 0..blades {
+            blade(p, angle - back + k as f32 * TAU / blades as f32, 0.22 / g as f32);
+        }
+    }
+    let solid = 1.0 - 0.35 * speed;
+    for k in 0..blades {
+        blade(p, angle + k as f32 * TAU / blades as f32, solid);
+    }
+    // at speed the blades blur into a faint disc
+    p.circle_filled(c, tip, Color32::from_white_alpha((10.0 * speed) as u8));
+
+    // hub: dark cap, red core (like the logo), small highlight
+    p.circle_filled(c, hub, Color32::from_rgb(28, 31, 39));
+    p.circle_stroke(c, hub, Stroke::new(1.5, Color32::from_white_alpha(28)));
+    p.circle_filled(c, hub * 0.46, if boost { ACCENT } else { ACCENT.gamma_multiply(0.85) });
+    p.circle_filled(c + vec2(-hub * 0.32, -hub * 0.32), hub * 0.22, Color32::from_white_alpha(22));
 }
 
 fn chart(p: &Painter, r: Rect, history: &VecDeque<(u8, u8)>) {
@@ -1017,13 +1146,41 @@ fn chart(p: &Painter, r: Rect, history: &VecDeque<(u8, u8)>) {
 }
 
 /// Segmented control with a sliding highlight. Returns the clicked index.
+/// How long a click is shown as already applied while the laptop catches up
+/// (the write, then the next read-back). After that the real state wins.
+const PENDING_SECS: f64 = 1.5;
+
+/// Instant feedback: remembers what was just clicked on control `id` and
+/// returns it in place of `actual` until the hardware reports it (or the
+/// grace time runs out, e.g. when the write was refused).
+fn optimistic<T: Copy + PartialEq + Send + Sync + 'static>(ctx: &egui::Context, id: Id, actual: T, clicked: Option<T>) -> T {
+    let key = id.with("pending");
+    let now = ctx.input(|i| i.time);
+    if let Some(v) = clicked {
+        ctx.data_mut(|d| d.insert_temp(key, (v, now)));
+    }
+    match ctx.data(|d| d.get_temp::<(T, f64)>(key)) {
+        Some((v, at)) if v != actual && now - at < PENDING_SECS => {
+            ctx.request_repaint_after(Duration::from_millis(200));
+            v
+        }
+        Some(_) => {
+            ctx.data_mut(|d| d.remove::<(T, f64)>(key));
+            actual
+        }
+        None => actual,
+    }
+}
+
 fn segmented(ui: &mut Ui, r: Rect, id: Id, opts: &[&str], sel: Option<usize>, enabled: bool) -> Option<usize> {
     let p = ui.painter().clone();
     p.rect_filled(r, 10.0, WELL);
     p.rect_stroke(r, 10.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
     let seg = r.width() / opts.len() as f32;
+    // show a click at once; the laptop confirms within a second
+    let sel = optimistic(ui.ctx(), id, sel, None);
     if let Some(s) = sel {
-        let x = ui.ctx().animate_value_with_time(id, s as f32, 0.22);
+        let x = ui.ctx().animate_value_with_time(id, s as f32, 0.18);
         let pill = Rect::from_min_size(pos2(r.left() + x * seg, r.top()), vec2(seg, r.height())).shrink(3.0);
         let col = if enabled { ACCENT } else { ACCENT.gamma_multiply(0.4) };
         p.rect_filled(pill.expand(3.0), 10.0, col.gamma_multiply(0.18));
@@ -1035,8 +1192,13 @@ fn segmented(ui: &mut Ui, r: Rect, id: Id, opts: &[&str], sel: Option<usize>, en
         let sense = if enabled { Sense::click() } else { Sense::hover() };
         let mut resp = ui.interact(sr, id.with(i), sense);
         let selected = sel == Some(i);
-        if enabled && resp.hovered() && !selected {
-            p.rect_filled(sr.shrink(3.0), 8.0, Color32::from_white_alpha(6));
+        if enabled && !selected {
+            // hover fades in; pressing pushes the cell in a little
+            let h = ui.ctx().animate_bool_with_time(id.with(("hover", i)), resp.hovered(), 0.12);
+            let press = if resp.is_pointer_button_down_on() { 2.0 } else { 0.0 };
+            if h > 0.0 {
+                p.rect_filled(sr.shrink(3.0 + press), 8.0, Color32::from_white_alpha((h * 9.0) as u8));
+            }
         }
         let mut col = if selected {
             Color32::WHITE
@@ -1056,6 +1218,9 @@ fn segmented(ui: &mut Ui, r: Rect, id: Id, opts: &[&str], sel: Option<usize>, en
             clicked = Some(i);
         }
     }
+    if let Some(i) = clicked {
+        optimistic(ui.ctx(), id, sel, Some(Some(i)));
+    }
     clicked
 }
 
@@ -1063,6 +1228,8 @@ fn segmented(ui: &mut Ui, r: Rect, id: Id, opts: &[&str], sel: Option<usize>, en
 fn switch(ui: &mut Ui, r: Rect, id: Id, on: bool, enabled: bool) -> bool {
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let mut resp = ui.interact(r, id, sense);
+    // flips at once on a click; the laptop confirms within a second
+    let on = optimistic(ui.ctx(), id, on, resp.clicked().then_some(!on));
     let t = ui.ctx().animate_bool_with_time(id, on, 0.18);
     let p = ui.painter();
     let mut track = mix(TRACK, ACCENT, t);
@@ -1180,7 +1347,7 @@ fn title_bar(ui: &mut Ui, full: Rect, mock: bool, tab: &mut Tab) -> Rect {
     p.text(pos2(logo.right() + 12.0, tb.center().y + 10.0), Align2::LEFT_CENTER, "GF63 Thin 10UC", regular(11.5), FAINT);
 
     // tabs, centred, with a sliding underline
-    let tabs = [(Tab::Dashboard, "Dashboard"), (Tab::Fans, "Fans"), (Tab::Tools, "Tools"), (Tab::System, "System"), (Tab::Automation, "Automation")];
+    let tabs = [(Tab::Dashboard, "Dashboard"), (Tab::Fans, "Fan"), (Tab::Tools, "Tools"), (Tab::System, "System"), (Tab::Automation, "Automation")];
     let tw = 100.0;
     let tx0 = tb.center().x - tw * tabs.len() as f32 / 2.0;
     for (i, (t, label)) in tabs.iter().enumerate() {
@@ -1276,17 +1443,6 @@ fn thousands(n: u32) -> String {
         out.push(ch);
     }
     out
-}
-
-/// Small three-blade fan icon, rotated by `turn` (in turns).
-fn fan_icon(p: &Painter, c: Pos2, r: f32, turn: f32, col: Color32) {
-    for k in 0..3 {
-        let a = (turn + k as f32 / 3.0) * std::f32::consts::TAU;
-        let tip = c + vec2(a.cos(), a.sin()) * r;
-        let side = c + vec2((a + 0.9).cos(), (a + 0.9).sin()) * r * 0.75;
-        p.add(Shape::convex_polygon(vec![c, tip, side], col, Stroke::NONE));
-    }
-    p.circle_filled(c, r * 0.28, CARD);
 }
 
 /// Thin rounded progress bar.
@@ -1400,21 +1556,46 @@ impl App {
         let bat = Rect::from_min_size(pos2(rx, row2), vec2(cw, 130.0));
         let kbd = Rect::from_min_size(pos2(rx + cw + GAP, row2), vec2(cw, 130.0));
 
-        // gauges
+        // [ CPU gauge ][ the one fan ][ GPU gauge ]
         card(p, hero);
-        let half = hero.width() / 2.0;
-        p.line_segment([pos2(hero.center().x, hero.top() + 22.0), pos2(hero.center().x, hero.bottom() - 46.0)], Stroke::new(1.0, BORDER));
-        let gtop = hero.min + vec2(0.0, 18.0);
-        gauge(ui, Rect::from_min_size(gtop, vec2(half, 220.0)), Id::new("g_cpu"), "CPU", CPU_C, st.cpu_temp_c, st.cpu_fan_pct);
-        gauge(ui, Rect::from_min_size(gtop + vec2(half, 0.0), vec2(half, 220.0)), Id::new("g_gpu"), "GPU", GPU_C, st.gpu_temp_c, st.gpu_fan_pct);
-        // the one real fan: its tachometer, centred under both gauges
-        let rpm = ui.ctx().animate_value_with_time(Id::new("rpm"), f32::from(st.fan_rpm), 0.6);
-        let pill = Rect::from_center_size(pos2(hero.center().x, hero.bottom() - 24.0), vec2(250.0, 28.0));
-        p.rect_filled(pill, 14.0, Color32::from_white_alpha(5));
-        fan_icon(p, pos2(pill.left() + 20.0, pill.center().y), 7.0, 0.0, DIM);
-        p.text(pos2(pill.left() + 36.0, pill.center().y), Align2::LEFT_CENTER, "FAN SPEED", semibold(10.5), FAINT);
-        let rtxt = if st.fan_rpm == 0 { "stopped".to_string() } else { format!("{} RPM", thousands(rpm.round() as u32)) };
-        p.text(pos2(pill.right() - 16.0, pill.center().y), Align2::RIGHT_CENTER, rtxt, semibold(13.5), TEXT);
+        let now = ui.ctx().input(|i| i.time);
+        let side = 165.0;
+        let mid = hero.width() - 2.0 * side;
+        let gtop = hero.min + vec2(0.0, 24.0);
+        gauge(ui, Rect::from_min_size(gtop, vec2(side, 240.0)), Id::new("g_cpu"), "CPU", CPU_C, st.cpu_temp_c, st.cpu_fan_pct, now);
+        gauge(ui, Rect::from_min_size(gtop + vec2(side + mid, 0.0), vec2(side, 240.0)), Id::new("g_gpu"), "GPU", GPU_C, st.gpu_temp_c, st.gpu_fan_pct, now);
+
+        let rpm = ui.ctx().animate_value_with_time(Id::new("rpm"), f32::from(st.fan_rpm), 0.8);
+        // spin: locked to the tachometer, in exact SLOW_MO slow motion (one
+        // turn on screen = 60 real turns). The real 40-115 turns a second
+        // can't be shown on a 60 Hz screen: the blades would look frozen or
+        // running backwards.
+        let dt = ui.ctx().input(|i| i.unstable_dt).min(0.1);
+        let spin = rpm / 60.0 / SLOW_MO * std::f32::consts::TAU * dt;
+        self.fan_angle = (self.fan_angle + spin) % std::f32::consts::TAU;
+        let fc = pos2(hero.left() + side + mid / 2.0, hero.top() + 106.0);
+        fan_art(p, fc, 58.0, self.fan_angle, spin, rpm, st.cooler_boost, now);
+        let rtxt = if st.fan_rpm == 0 { "stopped".to_string() } else { thousands(rpm.round() as u32) };
+        let num = p.layout_no_wrap(rtxt, bold(24.0), TEXT);
+        let unit = p.layout_no_wrap(if st.fan_rpm == 0 { String::new() } else { "RPM".into() }, semibold(11.5), DIM);
+        let tw = num.size().x + 5.0 + unit.size().x;
+        let ny = fc.y + 58.0 + 22.0;
+        let nw = num.size().x;
+        p.galley(pos2(fc.x - tw / 2.0, ny), num, TEXT);
+        p.galley(pos2(fc.x - tw / 2.0 + nw + 5.0, ny + 11.0), unit, DIM);
+        // mode chip
+        let (mode, col) = if st.cooler_boost {
+            ("COOLER BOOST".to_string(), ACCENT)
+        } else {
+            (st.fan_mode.map_or("FAN", fan_name).to_uppercase(), DIM)
+        };
+        let g = p.layout_no_wrap(mode, semibold(10.5), col);
+        let chip = Rect::from_center_size(pos2(fc.x, ny + 46.0), vec2(g.size().x + 22.0, 20.0));
+        p.rect_filled(chip, 10.0, col.gamma_multiply(0.12));
+        p.galley(chip.center() - g.size() / 2.0, g, col);
+        if st.fan_rpm > 0 {
+            p.text(pos2(fc.x, chip.bottom() + 13.0), Align2::CENTER_CENTER, "live  ·  60× slow motion", regular(10.5), FAINT);
+        }
 
         // chart
         card(p, ch);
@@ -1423,7 +1604,7 @@ impl App {
         // cooling
         card(p, cool);
         card_title(p, cool, "Cooling");
-        p.text(cool.left_bottom() + vec2(18.0, -20.0), Align2::LEFT_CENTER, "Auto: MSI's curve  ·  Silent: quietest  ·  Custom: your curve (Fans tab)", regular(12.0), FAINT);
+        p.text(cool.left_bottom() + vec2(18.0, -20.0), Align2::LEFT_CENTER, "Auto: MSI's curve  ·  Silent: quietest  ·  Custom: your curve (Fan tab)", regular(12.0), FAINT);
         let modes = [FanMode::Auto, FanMode::Silent, FanMode::Advanced];
         let fan_sel = st.fan_mode.ok().and_then(|m| modes.iter().position(|&x| x == m));
         let seg_r = Rect::from_min_size(cool.left_top() + vec2(18.0, 46.0), vec2(270.0, 40.0));
@@ -1432,7 +1613,7 @@ impl App {
         }
         let sw = Rect::from_min_size(pos2(cool.right() - 18.0 - 52.0, seg_r.center().y - 14.0), vec2(52.0, 28.0));
         p.text(pos2(sw.left() - 14.0, seg_r.center().y - 9.0), Align2::RIGHT_CENTER, "Cooler Boost", semibold(14.0), TEXT);
-        p.text(pos2(sw.left() - 14.0, seg_r.center().y + 10.0), Align2::RIGHT_CENTER, "Fans at full speed", regular(12.0), FAINT);
+        p.text(pos2(sw.left() - 14.0, seg_r.center().y + 10.0), Align2::RIGHT_CENTER, "Fan at full speed", regular(12.0), FAINT);
         if switch(ui, sw, Id::new("boost"), st.cooler_boost, can_write) {
             self.send(Cmd::Boost(!st.cooler_boost));
         }
@@ -1513,7 +1694,7 @@ impl App {
         // fans
         let c = cell(3);
         card(p, c);
-        card_title(p, c, "Fans");
+        card_title(p, c, "Fan");
         if let Some(st) = st {
             let mode = st.fan_mode.map_or("Unknown", fan_name);
             let mode = if st.cooler_boost { "Cooler Boost" } else { mode };
@@ -1617,7 +1798,7 @@ impl App {
 
         // ---- editor
         card_title(p, ed, "Fan curve");
-        p.text(ed.left_top() + vec2(18.0, 38.0), Align2::LEFT_TOP, "Drag the bars  ·  both fans  ·  grey line = lowest allowed", regular(12.0), FAINT);
+        p.text(ed.left_top() + vec2(18.0, 38.0), Align2::LEFT_TOP, "Drag the bars  ·  CPU + GPU  ·  grey line = lowest allowed", regular(12.0), FAINT);
         let saved = s.curve.unwrap_or(FanCurve::FACTORY).speeds();
         let mut draft = self.draft.unwrap_or(saved);
 
@@ -1654,7 +1835,7 @@ impl App {
         for i in 0..CURVE_POINTS {
             let col_r = Rect::from_min_max(pos2(plot.left() + colw * i as f32, plot.top() - 20.0), pos2(plot.left() + colw * (i + 1) as f32, plot.bottom()));
             let cx = col_r.center().x;
-            // where the fans are right now
+            // where the fan is right now
             if i == cpu_step || i == gpu_step {
                 let tint = match (i == cpu_step, i == gpu_step) {
                     (true, true) => mix(CPU_C, GPU_C, 0.5),
@@ -1709,7 +1890,7 @@ impl App {
         } else if self.draft.is_some() || custom_on {
             ("Not applied yet".to_string(), WARM)
         } else {
-            (format!("Fans are on {}  ·  Apply switches to Custom", st.fan_mode.map_or("?", fan_name)), DIM)
+            (format!("Fan is on {}  ·  Apply switches to Custom", st.fan_mode.map_or("?", fan_name)), DIM)
         };
         status_line(p, pos2(ed.left() + 18.0, by), &msg, col);
         let apply_r = Rect::from_min_size(pos2(ed.right() - 18.0 - 110.0, by - 17.0), vec2(110.0, 34.0));
@@ -1741,7 +1922,7 @@ impl App {
         };
         p.text(pos2(seg.left() + 2.0, seg.bottom() + 14.0), Align2::LEFT_CENTER, desc, regular(12.0), FAINT);
         let row = Rect::from_min_size(pos2(mode_r.left() + 18.0, mode_r.bottom() - 58.0), vec2(side_w - 36.0, 44.0));
-        if switch_row(ui, p, row, "boost2", "Cooler Boost", "Fans at full speed", st.cooler_boost, can_write) {
+        if switch_row(ui, p, row, "boost2", "Cooler Boost", "Fan at full speed", st.cooler_boost, can_write) {
             self.send(Cmd::Boost(!st.cooler_boost));
         }
 
@@ -1755,14 +1936,14 @@ impl App {
             let yy = now_r.top() + 52.0 + k as f32 * 70.0;
             p.circle_filled(pos2(now_r.left() + 22.0, yy + 7.0), 3.5, col);
             p.text(pos2(now_r.left() + 32.0, yy), Align2::LEFT_TOP, format!("{name}  {temp}°C"), semibold(13.5), TEXT);
-            p.text(pos2(now_r.right() - 18.0, yy), Align2::RIGHT_TOP, format!("fan {fan}%"), semibold(13.5), TEXT);
+            p.text(pos2(now_r.right() - 18.0, yy), Align2::RIGHT_TOP, format!("target {fan}%"), semibold(13.5), TEXT);
             bar(p, Rect::from_min_size(pos2(now_r.left() + 18.0, yy + 26.0), vec2(side_w - 36.0, 6.0)), fan as f32 / 100.0, col);
             p.text(pos2(now_r.left() + 18.0, yy + 44.0), Align2::LEFT_CENTER, format!("step {} of {CURVE_POINTS}", step + 1), regular(11.5), FAINT);
         }
         if st.cooler_boost {
             status_line(p, pos2(now_r.left() + 18.0, now_r.bottom() - 20.0), "Cooler Boost overrides the curve", ACCENT);
         } else {
-            p.text(pos2(now_r.left() + 18.0, now_r.bottom() - 20.0), Align2::LEFT_CENTER, "Fans follow changes within seconds", regular(11.5), FAINT);
+            p.text(pos2(now_r.left() + 18.0, now_r.bottom() - 20.0), Align2::LEFT_CENTER, "The fan follows changes within seconds", regular(11.5), FAINT);
         }
     }
 
@@ -1837,7 +2018,7 @@ impl App {
 
         // ---- scenarios
         card_title(p, scen, "Scenario");
-        p.text(scen.left_top() + vec2(110.0, 18.0), Align2::LEFT_TOP, "one click sets the power plan and fans together", regular(12.0), FAINT);
+        p.text(scen.left_top() + vec2(110.0, 18.0), Align2::LEFT_TOP, "one click sets the power plan and the fan together", regular(12.0), FAINT);
         let tw = (scen.width() - 36.0 - 3.0 * GAP) / 4.0;
         for (i, sc) in Scenario::ALL.into_iter().enumerate() {
             let t = Rect::from_min_size(pos2(scen.left() + 18.0 + i as f32 * (tw + GAP), scen.top() + 50.0), vec2(tw, scen.height() - 68.0));
@@ -1913,7 +2094,7 @@ impl App {
         // when unplugged
         card_title(p, unplug, "When unplugged");
         let row = |i: f32| Rect::from_min_size(pos2(unplug.left() + 18.0, unplug.top() + 50.0 + i * 54.0), vec2(unplug.width() - 36.0, 44.0));
-        if switch_row(ui, p, row(0.0), "bat_quiet", "Quiet fans", "Fans switch to Silent on battery", s.battery_quiet, true) {
+        if switch_row(ui, p, row(0.0), "bat_quiet", "Quiet fan", "Fan switches to Silent on battery", s.battery_quiet, true) {
             self.send(Cmd::BatteryQuiet(!s.battery_quiet));
         }
         if switch_row(ui, p, row(1.0), "bat_kbd", "Keyboard light off", "Saves power on battery", s.battery_kbd_off, true) {
@@ -2019,7 +2200,10 @@ impl eframe::App for App {
         }
         for d in todo {
             match d {
-                TrayDo::Show => Self::show_window(ctx),
+                TrayDo::Show => {
+                    self.hidden = false;
+                    Self::show_window(ctx);
+                }
                 TrayDo::Quit => {
                     self.quitting = true;
                     ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -2033,6 +2217,7 @@ impl eframe::App for App {
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting && self.close_to_tray() {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+            self.hidden = true;
         }
 
         // keep the tray tooltip and check marks current
@@ -2042,7 +2227,7 @@ impl eframe::App for App {
             let boost = if st.cooler_boost { "  ·  Cooler Boost" } else { "" };
             // RPM rounded to 100 so the tooltip doesn't churn on tach jitter
             let rpm = thousands((u32::from(st.fan_rpm) + 50) / 100 * 100);
-            let tip = format!("DragonSlayer\nCPU {}°C  ·  GPU {}°C\nFans {fans}  ·  {rpm} RPM{boost}", st.cpu_temp_c, st.gpu_temp_c);
+            let tip = format!("DragonSlayer\nCPU {}°C  ·  GPU {}°C\nFan {fans}  ·  {rpm} RPM{boost}", st.cpu_temp_c, st.gpu_temp_c);
             if tip != self.last_tip {
                 let _ = tray.set_tooltip(Some(&tip));
                 menu.boost.set_checked(st.cooler_boost);
@@ -2052,11 +2237,36 @@ impl eframe::App for App {
         }
     }
 
-    fn ui(&mut self, root: &mut Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, root: &mut Ui, frame: &mut eframe::Frame) {
         self.frames += 1;
+        // DS_FRAME_LOG=<file>: every 5 s, frames drawn and average CPU time
+        // per frame as eframe measures it (our code + paint, without vsync)
+        if let Some(path) = std::env::var_os("DS_FRAME_LOG") {
+            use std::io::Write;
+            let now = root.ctx().input(|i| i.time);
+            let (n, sum, since) = &mut self.frame_log;
+            *n += 1;
+            *sum += frame.info().cpu_usage.unwrap_or(0.0);
+            if now - *since >= 5.0 {
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                    let _ = writeln!(f, "{:.1} fps, {:.2} ms per frame", f64::from(*n) / (now - *since), *sum * 1000.0 / *n as f32);
+                }
+                self.frame_log = (0, 0.0, now);
+            }
+        }
         if self.frames == 2 && self.startup {
             let cmd = if self.close_to_tray() { ViewportCommand::Visible(false) } else { ViewportCommand::Minimized(true) };
             root.ctx().send_viewport_cmd(cmd);
+            self.hidden = true;
+        }
+        // animation frames only while the Dashboard is on screen
+        let minimized = root.ctx().input(|i| i.viewport().minimized.unwrap_or(false));
+        if self.tab == Tab::Dashboard && !self.hidden && !minimized {
+            // a steady 60 fps. Not request_repaint(): on a 144 Hz screen that
+            // redraws 144 times a second and the driver's vsync wait burns a
+            // whole CPU core. (egui subtracts predicted_dt from the delay.)
+            let predicted = root.ctx().input(|i| i.predicted_dt);
+            root.ctx().request_repaint_after(Duration::from_secs_f32(1.0 / 60.0 + predicted));
         }
         if self.frames == 3 {
             win::round_corners();
@@ -2088,11 +2298,27 @@ impl eframe::App for App {
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(BG)).show(root, |ui| {
             let full = ui.max_rect();
             let p = ui.painter().clone();
-            vgradient(&p, Rect::from_min_size(full.min, vec2(full.width(), 230.0)), ACCENT.gamma_multiply(0.09), Color32::TRANSPARENT);
+            let now = ui.ctx().input(|i| i.time);
+            // ambient glow behind the title bar: stronger as the laptop gets
+            // hotter, breathing slowly (the Dashboard redraws continuously)
+            let hottest = status.as_ref().map_or(50.0, |s| f32::from(s.cpu_temp_c.max(s.gpu_temp_c)));
+            let heat_now = ui.ctx().animate_value_with_time(Id::new("ambient"), temp_frac(hottest), 1.5);
+            let breathe = 0.5 + 0.5 * (now as f32 * (0.6 + 1.2 * heat_now)).sin();
+            let glow = 0.06 + 0.09 * heat_now + 0.025 * breathe * (0.4 + heat_now);
+            vgradient(&p, Rect::from_min_size(full.min, vec2(full.width(), 230.0 + 60.0 * heat_now)), ACCENT.gamma_multiply(glow), Color32::TRANSPARENT);
 
             let mut tab = self.tab;
             let tb = title_bar(ui, full, self.mock, &mut tab);
+            if tab != self.tab {
+                self.tab_since = now;
+            }
             self.tab = tab;
+            // a new tab's content fades in and settles upward
+            let t = (((now - self.tab_since) / 0.24) as f32).clamp(0.0, 1.0);
+            let enter = 1.0 - (1.0 - t).powi(3);
+            if t < 1.0 {
+                ui.ctx().request_repaint();
+            }
 
             let inner_w = full.width() - 2.0 * PAD;
             let x0 = full.left() + PAD;
@@ -2102,6 +2328,10 @@ impl eframe::App for App {
             let info = Rect::from_min_size(pos2(x0, area.bottom() + GAP), vec2(inner_w, 64.0));
             let foot = Rect::from_min_size(pos2(x0, info.bottom() + 6.0), vec2(inner_w, 24.0));
 
+            let strip_p = p.clone();
+            ui.set_opacity(enter);
+            let p = ui.painter().clone();
+            let area = area.translate(vec2(0.0, (1.0 - enter) * 14.0));
             match self.tab {
                 Tab::Dashboard => match &status {
                     Some(st) => self.dashboard(ui, &p, area, st, &history, can_write),
@@ -2115,6 +2345,8 @@ impl eframe::App for App {
                 Tab::System => self.system(&p, area, status.as_ref(), &sys),
                 Tab::Automation => self.automation(ui, &p, area, status.as_ref(), &settings, auto_boosted),
             }
+            ui.set_opacity(1.0);
+            let p = strip_p;
             self.strip(ui, &p, info, status.as_ref(), &sys, can_write, backend);
 
             let left = if status.is_some() && error.is_some() {
