@@ -222,6 +222,52 @@ backlight, temps) so the bytes can be matched to it.
       match what Dragon Center shows right now
 - [ ] Only after all match: try one reversible write (keyboard backlight level)
 
+## Fan measurement and preset tuning (2026-11-17)
+
+`research/measure-fan.ps1` held flat custom curves and logged temperatures,
+fan targets and RPM every ~3 s (`research/fan-measure-2026-11-17.csv`).
+The laptop was in normal light use, not on a test bench.
+
+| Fan speed | RPM (settled) | Light use: CPU / GPU |
+|---|---|---|
+| 35 % | 2,080 | 64–67 °C / 60 °C (first 25 s, before a load burst) |
+| 45 % | 2,690 | |
+| 50 % | 2,990 | 62–66 °C / 59 °C |
+| 60 % | 3,570 | |
+| 65 % | 3,880 | 62–66 °C / 58 °C |
+| 80 % | 4,750 | about 62 °C / 61 °C |
+| 90 % | 5,125 (12 s, still rising) | about 60 °C / 60 °C |
+| 100 % | 5,770–5,925 | |
+| Cooler Boost | 6,860 | |
+
+What it shows:
+
+- **RPM ≈ 59.5 × percent.** Cooler Boost is faster than a 100 % curve.
+- **In light use the fan hardly matters.** 50 % and 65 % differ by about
+  1 °C, 50 % and 90 % by about 5 °C.
+- **The fan is slow, the CPU is fast.** 2,100 → 4,200 RPM takes about 25 s
+  (roughly 100 RPM per second, up or down). A load burst lifts the CPU
+  20 °C within seconds: 4 busy threads took it to 87 °C in under 3 s even
+  with the fan at 100 %, and a burst that began at 35 % peaked at 92 °C
+  while the fan was still spinning up. Fan speed changes the temperature
+  the CPU settles at, not the first spike.
+- **Idle sits on a curve step.** 62–66 °C straddles the 64 °C step, so the
+  factory curve flips between 43 % and 48 % (2,560 ↔ 2,860 RPM).
+
+Presets built on that (speeds for <55, 55, 64, 73, 76, 82, 88 °C on the CPU):
+
+| Preset | Curve | Idea |
+|---|---|---|
+| Quiet | 30 33 33 45 58 70 85 | one low speed (1,960 RPM) for 55–73 °C, then up early because the fan is slow |
+| Factory | 38 43 48 54 60 70 85 | MSI's own |
+| Cool | 45 52 52 65 75 85 95 | already spinning before load arrives |
+| Max | 60 66 66 80 90 100 100 | 100 % from 82 °C |
+
+Not measured: steady temperatures at 30–35 % over many minutes, and any of
+the presets under a long game load (the load step ended at once at 87 °C).
+If Quiet is too slow for some use, the CPU reaches 73 °C and the curve
+speeds up by itself.
+
 ## Sources
 
 - msi-ec driver: https://github.com/BeardOverflow/msi-ec (`msi-ec.c`, `CONF_G1_7`)

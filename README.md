@@ -11,14 +11,21 @@ More: [Fans](docs/demo-fans.png) · [Tools](docs/demo-tools.png) ·
 
 ## What it does
 
-- Live CPU / GPU temperature, fan % and the fan's real **RPM** (the GF63
-  Thin has one fan for both), 2-minute temperature chart
+- Live CPU / GPU temperature and the fan's real **RPM**, 2-minute
+  temperature chart. The GF63 Thin has **one fan** for CPU and GPU: the
+  Dashboard draws it between the two gauges, turning in step with the
+  tachometer in exact 60× slow motion (the real 40–115 turns a second can't
+  be shown on a screen). Each gauge shows the fan speed its curve asks for.
+- Animated at a paced 60 fps while the Dashboard is visible (about 9% of
+  one core), nothing when hidden in the tray or minimised
 - Maximise button (or double-click the title bar): the whole layout scales
   up to fill the screen
-- Fans: **Auto / Silent / Custom**, **Cooler Boost** on/off
-- **Custom fan curve** (Fans tab): drag 7 bars, or pick Quiet / Factory /
-  Cool / Max. Safety: 20–100%, never decreasing, and the two hottest steps
-  never below factory (70%, 85%). Auto and Silent put the factory curve back.
+- Fan: **Auto / Silent / Custom**, **Cooler Boost** on/off
+- **Custom fan curve** (Fan tab): drag 7 bars (hover shows the RPM), or pick
+  Quiet / Factory / Cool / Max. Safety: 20–100%, never decreasing, and the
+  two hottest steps never below factory (70%, 85%). Auto and Silent put the
+  factory curve back. The presets are tuned from a measurement of this
+  laptop (see "Fan measurement" in docs/how-dragon-center-works.md).
 - **Webcam** power on/off (hardware), with a check whether Windows sees a camera
 - **Windows-key lock** for gaming (software hook, while the app runs)
 - **Power plan** switcher (Windows plans: Balanced, Ultimate Performance, ...)
@@ -109,7 +116,7 @@ DragonSlayer  ──PawnIO (signed driver)──►  EC ports 0x62/0x66  ──�
 | Keyboard light | `0xF3` | **changed via PawnIO, cross-checked** |
 | Fan Auto / Silent | `0xF4` | **changed via PawnIO** (Silent → Auto) |
 | Cooler Boost | `0x98` bit 7 | **changed via PawnIO**, fan went to ~6,850 RPM |
-| Custom fan curve | `0x72–0x78`, `0x8A–0x90` | **changed from the app**: fans went 70→82% / 54→63% within 3 s, exactly as the curve says; Auto restored factory |
+| Custom fan curve | `0x72–0x78`, `0x8A–0x90` | **changed from the app**: targets went 70→82% / 54→63% within 3 s, exactly as the curve says; Auto restored factory. RPM ≈ 59.5 × percent (measured 35–100%) |
 | Webcam | `0x2E` bit 1 | bit changes and reads back, **but Windows saw no camera** either way (camera may be disconnected on this unit) |
 | Power plans | Windows API | switched Ultimate → Balanced → Ultimate |
 | Windows-key lock | software | **works**: injected Windows key swallowed, other keys pass (`examples/winkey_check.rs`) |
@@ -168,6 +175,7 @@ assets/              logo: logo-source.webp (original), logo.png (cut-out
                      Windows' icon cache)
 examples/winkey_check.rs   automatic Windows-key lock test
 examples/icon_preview.rs   icon at 16-64 px, to check it stays readable
-research/            probe/watch/test scripts
+research/            probe/watch/test scripts; install.ps1 (install + click
+                     test), measure-fan.ps1 + fan-measure-2026-11-17.csv
 docs/                findings, plans, screenshot
 ```

@@ -259,6 +259,15 @@ fn spawn_worker<B: EcBackend + 'static>(
             tick = tick.wrapping_add(1);
 
             let mut status = ctl.status();
+            // demo: make the readings move every second like a real laptop's.
+            // (Still demo data hid a bug where each change of a live reading
+            // made the UI redraw at the full refresh rate.)
+            if !persist && let Ok(st) = &mut status {
+                let wobble = |salt: u32, span: u32| (tick.wrapping_mul(2_654_435_761).rotate_left(salt) % span) as u8;
+                st.cpu_temp_c += wobble(3, 6);
+                st.gpu_temp_c += wobble(7, 3);
+                st.fan_rpm += u16::from(wobble(11, 120));
+            }
 
             // automation: heat protection, on-battery profile
             let mut auto_msg = None;
@@ -923,6 +932,23 @@ fn arc(p: &Painter, c: Pos2, r: f32, w: f32, a0: f32, a1: f32, color: impl Fn(f3
 const A0: f32 = 0.75 * PI; // 135°, bottom-left
 const SWEEP: f32 = 1.5 * PI; // 270°
 
+/// Eases a live reading toward `target` (time constant `tau` seconds) without
+/// asking for repaints. egui's own animate_* helpers redraw at the screen's
+/// full refresh rate while a value is changing; live readings change every
+/// second, so on a 144 Hz screen that kept one CPU core busy. Frames come
+/// from the Dashboard's 60 fps pacing (or the once-a-second data tick).
+fn ease(ctx: &egui::Context, id: Id, target: f32, tau: f32) -> f32 {
+    let dt = ctx.input(|i| i.stable_dt).min(0.25);
+    ctx.data_mut(|d| {
+        let v = d.get_temp_mut_or(id, target);
+        *v += (target - *v) * (1.0 - (-dt / tau).exp());
+        if (target - *v).abs() < 0.02 {
+            *v = target;
+        }
+        *v
+    })
+}
+
 /// Temperature gauge sized to its column. `now` (seconds) drives the
 /// animation: a pulse ring on the arc's tip (faster and wider when hot) and
 /// a shine that runs along the filled arc. `target` is the fan speed this
@@ -930,8 +956,8 @@ const SWEEP: f32 = 1.5 * PI; // 270°
 #[allow(clippy::too_many_arguments)]
 fn gauge(ui: &Ui, r: Rect, id: Id, name: &str, accent: Color32, temp: u8, target: u8, now: f64) {
     let p = ui.painter();
-    let shown = ui.ctx().animate_value_with_time(id, temp as f32, 0.6);
-    let target_shown = ui.ctx().animate_value_with_time(id.with("target"), target as f32, 0.6);
+    let shown = ease(ui.ctx(), id, temp as f32, 0.25);
+    let target_shown = ease(ui.ctx(), id.with("target"), target as f32, 0.25);
     let f = temp_frac(shown);
 
     let rad = ((r.width() - 40.0) / 2.0).min(70.0);
@@ -1565,7 +1591,7 @@ impl App {
         gauge(ui, Rect::from_min_size(gtop, vec2(side, 240.0)), Id::new("g_cpu"), "CPU", CPU_C, st.cpu_temp_c, st.cpu_fan_pct, now);
         gauge(ui, Rect::from_min_size(gtop + vec2(side + mid, 0.0), vec2(side, 240.0)), Id::new("g_gpu"), "GPU", GPU_C, st.gpu_temp_c, st.gpu_fan_pct, now);
 
-        let rpm = ui.ctx().animate_value_with_time(Id::new("rpm"), f32::from(st.fan_rpm), 0.8);
+        let rpm = ease(ui.ctx(), Id::new("rpm"), f32::from(st.fan_rpm), 0.35);
         // spin: locked to the tachometer, in exact SLOW_MO slow motion (one
         // turn on screen = 60 real turns). The real 40-115 turns a second
         // can't be shown on a 60 Hz screen: the blades would look frozen or
@@ -1867,6 +1893,11 @@ impl App {
             p.circle_filled(pos2(cx, top), if hover { 9.0 } else { 7.0 }, col.gamma_multiply(0.3));
             p.circle_filled(pos2(cx, top), if hover { 6.0 } else { 5.0 }, Color32::WHITE);
             p.text(pos2(cx, top - 16.0), Align2::CENTER_CENTER, format!("{}%", draft[i]), semibold(12.5), TEXT);
+            if hover {
+                // what that percentage means on this laptop (measured)
+                let rpm = (f32::from(draft[i]) * FanCurve::RPM_PER_PCT / 10.0).round() as u32 * 10;
+                p.text(pos2(cx, top - 31.0), Align2::CENTER_CENTER, format!("≈ {} RPM", thousands(rpm)), regular(11.0), DIM);
+            }
             p.text(pos2(cx, plot.bottom() + 16.0), Align2::CENTER_CENTER, step_label(&st.cpu_curve_temps, i), semibold(12.0), if i == cpu_step { CPU_C } else { DIM });
             p.text(pos2(cx, plot.bottom() + 33.0), Align2::CENTER_CENTER, step_label(&st.gpu_curve_temps, i), regular(11.0), if i == gpu_step { GPU_C } else { FAINT });
         }
@@ -1943,7 +1974,7 @@ impl App {
         if st.cooler_boost {
             status_line(p, pos2(now_r.left() + 18.0, now_r.bottom() - 20.0), "Cooler Boost overrides the curve", ACCENT);
         } else {
-            p.text(pos2(now_r.left() + 18.0, now_r.bottom() - 20.0), Align2::LEFT_CENTER, "The fan follows changes within seconds", regular(11.5), FAINT);
+            p.text(pos2(now_r.left() + 18.0, now_r.bottom() - 20.0), Align2::LEFT_CENTER, "The fan takes up to 30 s to change speed", regular(11.5), FAINT);
         }
     }
 
@@ -2302,7 +2333,7 @@ impl eframe::App for App {
             // ambient glow behind the title bar: stronger as the laptop gets
             // hotter, breathing slowly (the Dashboard redraws continuously)
             let hottest = status.as_ref().map_or(50.0, |s| f32::from(s.cpu_temp_c.max(s.gpu_temp_c)));
-            let heat_now = ui.ctx().animate_value_with_time(Id::new("ambient"), temp_frac(hottest), 1.5);
+            let heat_now = ease(ui.ctx(), Id::new("ambient"), temp_frac(hottest), 0.8);
             let breathe = 0.5 + 0.5 * (now as f32 * (0.6 + 1.2 * heat_now)).sin();
             let glow = 0.06 + 0.09 * heat_now + 0.025 * breathe * (0.4 + heat_now);
             vgradient(&p, Rect::from_min_size(full.min, vec2(full.width(), 230.0 + 60.0 * heat_now)), ACCENT.gamma_multiply(glow), Color32::TRANSPARENT);

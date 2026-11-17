@@ -216,9 +216,29 @@ impl FanCurve {
     pub const MAX_PCT: u8 = 100;
     /// Read from this laptop's EC in Auto mode (same for CPU and GPU).
     pub const FACTORY: FanCurve = FanCurve([38, 43, 48, 54, 60, 70, 85]);
-    pub const QUIET: FanCurve = FanCurve([30, 34, 40, 47, 56, 70, 85]);
-    pub const COOL: FanCurve = FanCurve([45, 50, 56, 63, 72, 82, 95]);
-    pub const MAX: FanCurve = FanCurve([55, 62, 70, 78, 88, 96, 100]);
+
+    // Quiet / Cool / Max are tuned from a measurement of this laptop
+    // (research/measure-fan.ps1, 2026-11-17; docs/how-dragon-center-works.md):
+    // - RPM is close to 59.5 x percent (35 % = 2,080, 50 % = 2,990,
+    //   100 % = 5,770; Cooler Boost goes beyond the curve: 6,860).
+    // - In light use the CPU sits at 62-66 C whatever the fan does: 50 %,
+    //   65 % and 90 % differ by about 1 C and 5 C. So extra speed below 73 C
+    //   is mostly noise.
+    // - 62-66 C straddles the 64 C step, so a curve that changes there makes
+    //   the fan hunt up and down. Each preset holds ONE speed from 55 to 73 C.
+    // - Load pushes the CPU up 20 C within seconds, while the fan needs
+    //   about 25 s to go from 2,100 to 4,200 RPM. Starting a burst at 35 %
+    //   the CPU peaked at 92 C. So every preset is already ramping at 73 C
+    //   and 76 C instead of waiting for the hot end.
+    /// Light use at about 1,960 RPM (factory: 2,560-2,860), then up early.
+    pub const QUIET: FanCurve = FanCurve([30, 33, 33, 45, 58, 70, 85]);
+    /// Spinning faster before load arrives, to cut the peaks.
+    pub const COOL: FanCurve = FanCurve([45, 52, 52, 65, 75, 85, 95]);
+    /// As much as the curve allows: 100 % from 82 C.
+    pub const MAX: FanCurve = FanCurve([60, 66, 66, 80, 90, 100, 100]);
+
+    /// Measured on this laptop: fan RPM per percent of fan speed.
+    pub const RPM_PER_PCT: f32 = 59.5;
 
     pub fn new(speeds: [u8; CURVE_POINTS]) -> Option<Self> {
         let in_range = speeds.iter().all(|s| (Self::MIN_PCT..=Self::MAX_PCT).contains(s));
@@ -354,6 +374,15 @@ mod tests {
     fn fan_curve_rules() {
         for c in [FanCurve::FACTORY, FanCurve::QUIET, FanCurve::COOL, FanCurve::MAX] {
             assert_eq!(FanCurve::new(c.speeds()), Some(c), "presets must pass the rules");
+        }
+        // presets: each step up in name is at least as fast at every point,
+        // and none changes speed at the 64 C step this laptop idles on
+        let order = [FanCurve::QUIET, FanCurve::FACTORY, FanCurve::COOL, FanCurve::MAX];
+        for w in order.windows(2) {
+            assert!(w[0].speeds().iter().zip(w[1].speeds()).all(|(a, b)| *a <= b), "{w:?}");
+        }
+        for c in [FanCurve::QUIET, FanCurve::COOL, FanCurve::MAX] {
+            assert_eq!(c.speeds()[1], c.speeds()[2], "no hunting around 64 C");
         }
         assert_eq!(FanCurve::new([19, 43, 48, 54, 60, 70, 85]), None, "below minimum");
         assert_eq!(FanCurve::new([38, 43, 48, 54, 60, 70, 101]), None, "above 100");

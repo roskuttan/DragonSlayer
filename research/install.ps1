@@ -9,9 +9,15 @@ param([switch]$Elevated, [string]$Log)
 $root = Split-Path $PSScriptRoot -Parent
 if (-not $Elevated) {
   $Log = Join-Path $env:TEMP 'dragonslayer-install.log'
-  $p = Start-Process powershell -Verb RunAs -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-Elevated', '-Log', "`"$Log`"")
+  Remove-Item -LiteralPath $Log -ErrorAction SilentlyContinue   # never show a previous run's log
+  try {
+    $p = Start-Process powershell -Verb RunAs -WindowStyle Hidden -PassThru -ErrorAction Stop -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-Elevated', '-Log', "`"$Log`"")
+  } catch {
+    'NOT INSTALLED: the admin prompt was cancelled. Nothing was changed.'
+    return
+  }
   $p.WaitForExit()
-  Get-Content $Log
+  if (Test-Path -LiteralPath $Log) { Get-Content $Log } else { 'NOT INSTALLED: the admin part wrote no log.' }
   return
 }
 function L($s) { $s | Out-File $Log -Append -Encoding utf8 }
