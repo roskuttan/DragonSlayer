@@ -108,7 +108,7 @@ fan auto|silent | curve quiet|cool|max|38,43,48,54,60,70,85 | webcam on|off |
 boost on|off | charge 60 | kbd 0-3 | power [plan name]` (add
 `--backend pawnio` and run from an admin terminal to use PawnIO).
 
-Tests: `cargo test` (61 tests; Smart mode runs against a simulated laptop).
+Tests: `cargo test` (62 tests; Smart mode runs against a simulated laptop).
 Windows-key lock check without touching the keyboard:
 `cargo run --release --example winkey_check`.
 
@@ -150,7 +150,7 @@ DragonSlayer  ──PawnIO (signed driver)──►  EC ports 0x62/0x66  ──�
 | Settings restore | — | **works**: re-applied the saved keyboard level on start |
 | Dragon Center removed | — | everything above re-checked through PawnIO afterwards |
 | Start with Windows | — | **works**: started hidden in the tray after the 2026-11-17 restart |
-| Smart fan mode | `0x72–0x78`, `0x8A–0x90` | built; tested only against a simulated laptop, **not yet run on this PC** |
+| Smart fan mode | `0x72–0x78`, `0x8A–0x90` | **runs on this PC** since 2026-11-17: 30 % in light use = about 1,790 RPM (Auto: 2,500–2,900), 90–100 % during a build. Being tuned from the history log; not yet tried in a long game |
 | Screen refresh switching | Windows API | reads this screen (48 / 144 Hz); **switching not yet tried on this PC** |
 | Tray, scenarios | — | built, not yet tried on this PC |
 

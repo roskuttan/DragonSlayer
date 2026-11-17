@@ -38,8 +38,9 @@ pub fn step_pct(step: usize) -> u8 {
 
 /// Before anything is learned: expected temperature at 50 % fan per load
 /// level, and how many degrees +10 % fan buys there. From the measurement
-/// (light use: ~1 C per 10 %) and typical thin-laptop behaviour under load.
-const PRIOR_AT_50: [f32; LOADS] = [64.0, 68.0, 76.0, 84.0, 90.0];
+/// (light use: ~1 C per 10 %), the first real Smart readings (idle 68 C and
+/// light 72 C at 30 %) and typical thin-laptop behaviour under load.
+const PRIOR_AT_50: [f32; LOADS] = [67.0, 70.0, 76.0, 84.0, 90.0];
 const PRIOR_GAIN: [f32; LOADS] = [0.8, 1.2, 2.0, 3.0, 3.5];
 
 /// Temperature Smart mode aims to stay under (plugged in, slider centred).
@@ -47,7 +48,8 @@ pub const TARGET_C: f32 = 72.0;
 const BATTERY_EXTRA_C: f32 = 4.0;
 /// Not worth another 10 % of fan for less than this many degrees.
 const KNEE_C: f32 = 1.5;
-/// Hotter than the map expected by this much: add speed step by step.
+/// Hotter than the map expects for this load and speed by this much: add
+/// speed step by step.
 const TRIM_OVER_C: f32 = 6.0;
 /// Load must stay higher this long to count (ignores spikes).
 const UP_SECS: f32 = 3.0;
@@ -262,7 +264,10 @@ impl Brain {
             self.above_secs += dt;
             self.below_secs = 0.0;
             if self.above_secs >= UP_SECS {
-                self.level = self.above_min;
+                // one level per UP_SECS: a 3-second burst (a program starting)
+                // moves the fan one notch, not straight to 90 %; load that
+                // keeps going climbs a level every 3 s
+                self.level = self.above_min.min(self.level + 1);
                 self.above_secs = 0.0;
                 self.rose_secs_ago = 0.0;
             }
@@ -299,20 +304,31 @@ impl Brain {
 
         // speed from the map, plus extra steps if it runs hotter than expected
         let base = self.choose(level, target);
-        if heat > target + TRIM_OVER_C {
+        // Extra speed only when it runs hotter than the MAP expects for
+        // this load and speed (a load it can't see, blocked vents), not
+        // merely hotter than the target. Real data, 2026-11-17: with the
+        // Cooler preference the target (68 C) sat below what this laptop
+        // idles at whatever the fan does, and "hotter than the target"
+        // crept the fan from 30 % to 70 % at 3 % CPU load.
+        let expected = self.estimates(level)[(base + self.trim).min(STEPS - 1)];
+        if heat > expected + TRIM_OVER_C && heat > target {
             self.hot_secs += dt;
             self.cool_secs = 0.0;
             if self.hot_secs >= 10.0 && base + self.trim < STEPS - 1 {
                 self.trim += 1;
                 self.hot_secs = 0.0;
             }
-        } else if heat < target - 1.0 {
+        } else if heat < expected + 2.0 {
             self.cool_secs += dt;
             self.hot_secs = 0.0;
             if self.cool_secs >= 20.0 && self.trim > 0 {
                 self.trim -= 1;
                 self.cool_secs = 0.0;
             }
+        } else {
+            // in between: a moment of heat must not add up across spikes
+            self.hot_secs = 0.0;
+            self.cool_secs = 0.0;
         }
         let mut step = (base + self.trim).min(STEPS - 1);
         // hard guards, whatever was learned
@@ -479,18 +495,20 @@ mod tests {
         changes: u32,
         peak: f32,
         last: Option<Decision>,
+        /// the Quieter (+) / Cooler (-) preference
+        bias: f32,
     }
 
     impl Run {
         fn new(brain: Brain) -> Self {
-            Self { brain, pc: Laptop::new(), fan: 30, changes: 0, peak: 0.0, last: None }
+            Self { brain, pc: Laptop::new(), fan: 30, changes: 0, peak: 0.0, last: None, bias: 0.0 }
         }
         /// `secs` seconds at a CPU load (percent), with an optional program in front.
         fn go(&mut self, secs: u32, cpu_load: f32, app: Option<&str>) {
             for _ in 0..secs {
                 self.pc.step(cpu_load, self.fan);
                 let s = Sample { cpu_temp: self.pc.chip, gpu_temp: self.pc.sink + 12.0, cpu_load, app: app.map(String::from), ..Default::default() };
-                let d = self.brain.tick(&s, 1.0, 0.0);
+                let d = self.brain.tick(&s, 1.0, self.bias);
                 if d.fan_pct != self.fan {
                     self.changes += 1;
                 }
@@ -511,6 +529,28 @@ mod tests {
     }
 
     #[test]
+    fn cooler_preference_does_not_creep_at_idle() {
+        // Seen on the real laptop: with Cooler the target sits below what
+        // idle settles at whatever the fan does. More fan buys nothing
+        // there, so the fan must stay put instead of creeping to 70 %.
+        let mut r = Run::new(Brain::default());
+        r.bias = -4.0;
+        r.go(900, 4.0, None);
+        assert!(r.pc.chip > TARGET_C - 4.0, "idle ({:.1}) is above the Cooler target", r.pc.chip);
+        assert_eq!(r.fan, 30);
+        assert!(r.changes <= 1, "{} changes", r.changes);
+        // under real load Cooler does ask for more than Balanced
+        let mut cool = Run::new(Brain::default());
+        cool.bias = -4.0;
+        let mut bal = Run::new(Brain::default());
+        for run in [&mut cool, &mut bal] {
+            run.go(60, 4.0, None);
+            run.go(600, 30.0, None);
+        }
+        assert!(cool.fan >= bal.fan, "Cooler {} % vs Balanced {} %", cool.fan, bal.fan);
+    }
+
+    #[test]
     fn spikes_do_not_move_the_fan() {
         let mut r = Run::new(Brain::default());
         r.go(120, 4.0, None);
@@ -528,10 +568,12 @@ mod tests {
         let mut r = Run::new(Brain::default());
         r.go(300, 4.0, None);
         assert_eq!(r.fan, 30);
-        r.go(6, 60.0, None);
-        assert!(r.fan >= 80, "6 s into heavy load the fan is already at {} %", r.fan);
+        r.go(7, 60.0, None);
+        assert!(r.fan > 30 && r.fan < 90, "climbing a level every 3 s, not one jump: {} %", r.fan);
+        r.go(5, 60.0, None);
+        assert!(r.fan >= 80, "12 s into heavy load the fan is already at {} %", r.fan);
         // a curve would still be waiting: the heatsink has hardly warmed
-        assert!(r.pc.sink < 45.0, "heatsink only at {:.1}", r.pc.sink);
+        assert!(r.pc.sink < 48.0, "heatsink only at {:.1}", r.pc.sink);
         assert!(r.last.unwrap().reason.contains("before the heat"));
     }
 

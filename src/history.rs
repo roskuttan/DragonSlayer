@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 pub const KEEP_DAYS: usize = 14;
 pub const EVERY_SECS: u32 = 5;
-pub const HEADER: &str = "time,mode,cpu_c,gpu_c,cpu_load,gpu_load,fan_target_pct,rpm,battery,boost,smart_pct,smart_load_level";
+pub const HEADER: &str = "time,mode,cpu_c,gpu_c,cpu_load,gpu_load,fan_target_pct,rpm,battery,boost,smart_pct,smart_load_level,smart_heat_c,smart_target_c";
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Row {
@@ -26,14 +26,15 @@ pub struct Row {
     pub rpm: u16,
     pub on_battery: bool,
     pub boost: bool,
-    /// Smart mode's own decision, when it is on
-    pub smart: Option<(u8, usize)>,
+    /// Smart mode's own decision, when it is on: speed, load level, the
+    /// smoothed temperature it steers by, and the temperature it aims under
+    pub smart: Option<(u8, usize, f32, f32)>,
 }
 
 pub fn line(time: &str, r: &Row) -> String {
-    let (sp, sl) = r.smart.map_or((String::new(), String::new()), |(p, l)| (p.to_string(), l.to_string()));
+    let s = r.smart.map_or(",,,".to_string(), |(p, l, h, t)| format!("{p},{l},{h:.1},{t:.0}"));
     format!(
-        "{time},{},{},{},{:.0},{:.0},{},{},{},{},{sp},{sl}",
+        "{time},{},{},{},{:.0},{:.0},{},{},{},{},{s}",
         r.mode, r.cpu_c, r.gpu_c, r.cpu_load, r.gpu_load, r.fan_target_pct, r.rpm, u8::from(r.on_battery), u8::from(r.boost)
     )
 }
@@ -96,6 +97,15 @@ impl Log {
             for old in expired(names, KEEP_DAYS) {
                 let _ = std::fs::remove_file(self.dir.join(old));
             }
+            // today's file from an older build has other columns: put the
+            // current header in before the first new row
+            if let Ok(text) = std::fs::read_to_string(&path)
+                && !text.is_empty()
+                && !text.lines().any(|l| l == HEADER)
+                && let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&path)
+            {
+                let _ = writeln!(f, "{HEADER}");
+            }
             self.day = day;
         }
         let new = !path.exists();
@@ -114,12 +124,12 @@ mod tests {
 
     #[test]
     fn line_matches_the_header() {
-        let r = Row { mode: "smart", cpu_c: 71, gpu_c: 60, cpu_load: 12.4, gpu_load: 0.0, fan_target_pct: 40, rpm: 2380, on_battery: true, boost: false, smart: Some((40, 1)) };
+        let r = Row { mode: "smart", cpu_c: 71, gpu_c: 60, cpu_load: 12.4, gpu_load: 0.0, fan_target_pct: 40, rpm: 2380, on_battery: true, boost: false, smart: Some((40, 1, 70.6, 72.0)) };
         let l = line("11:05:03", &r);
-        assert_eq!(l, "11:05:03,smart,71,60,12,0,40,2380,1,0,40,1");
+        assert_eq!(l, "11:05:03,smart,71,60,12,0,40,2380,1,0,40,1,70.6,72");
         assert_eq!(l.split(',').count(), HEADER.split(',').count());
         let auto = line("11:05:08", &Row { mode: "auto", smart: None, ..r });
-        assert!(auto.ends_with(",1,0,,"), "{auto}");
+        assert!(auto.ends_with(",1,0,,,,"), "{auto}");
         assert_eq!(auto.split(',').count(), HEADER.split(',').count());
     }
 
@@ -138,13 +148,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut log = Log::new(dir.clone());
         log.append(&Row { mode: "auto", ..Default::default() });
-        log.append(&Row { mode: "smart", smart: Some((50, 2)), ..Default::default() });
+        log.append(&Row { mode: "smart", smart: Some((50, 2, 75.0, 72.0)), ..Default::default() });
         let file = std::fs::read_dir(&dir).unwrap().flatten().next().unwrap().path();
         let text = std::fs::read_to_string(file).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0], HEADER);
-        assert!(lines[2].contains(",smart,") && lines[2].ends_with(",50,2"));
+        assert!(lines[2].contains(",smart,") && lines[2].ends_with(",50,2,75.0,72"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -465,7 +465,7 @@ fn spawn_worker<B: EcBackend + 'static>(
                     rpm: st.fan_rpm,
                     on_battery: power.is_some_and(|p| !p.0),
                     boost: st.cooler_boost,
-                    smart: decision.as_ref().map(|d| (d.fan_pct, d.load_level)),
+                    smart: decision.as_ref().map(|d| (d.fan_pct, d.load_level, d.heat_c, d.target_c)),
                 });
             }
 
