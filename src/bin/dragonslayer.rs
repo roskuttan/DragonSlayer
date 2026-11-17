@@ -108,6 +108,8 @@ enum Cmd {
     /// Throw away everything Smart mode has learned
     SmartForget,
     Refresh(Refresh),
+    /// Quit: restore MSI's curve if Smart was steering, then report back.
+    HandBack(mpsc::Sender<()>),
 }
 
 /// One-click presets, like Dragon Center's "User Scenario" page.
@@ -142,6 +144,11 @@ impl Scenario {
         if self == Self::Silent { FanMode::Silent } else { FanMode::Auto }
     }
 
+    /// Smart mode runs the fan in this scenario.
+    fn smart(self) -> bool {
+        matches!(self, Self::Balanced | Self::Performance)
+    }
+
     fn boost(self) -> bool {
         self == Self::Extreme
     }
@@ -149,7 +156,7 @@ impl Scenario {
     fn fans_text(self) -> &'static str {
         match self {
             Self::Silent => "Silent fan",
-            Self::Balanced | Self::Performance => "Auto fan",
+            Self::Balanced | Self::Performance => "Smart fan",
             Self::Extreme => "Cooler Boost",
         }
     }
@@ -243,7 +250,8 @@ fn spawn_worker<B: EcBackend + 'static>(
     persist: bool,
 ) {
     std::thread::spawn(move || {
-        let (mut settings, load_err) = if persist { Settings::load_checked() } else { (Settings::default(), None) };
+        // (the demo starts like a fresh install: Smart mode on)
+        let (mut settings, load_err) = if persist { Settings::load_checked() } else { (Settings::first_run(), None) };
         if persist && let Some(p) = Settings::path() {
             // start report: did reading and writing the settings folder work?
             // (readable without admin rights, for finding problems later)
@@ -316,6 +324,16 @@ fn spawn_worker<B: EcBackend + 'static>(
         let mut tick: u32 = 0;
         loop {
             match rx.recv_timeout(Duration::from_secs(1)) {
+                // the app is quitting: give the fan back to the laptop's own curve
+                // (a Smart speed must not stay behind with nothing steering it)
+                Ok(Cmd::HandBack(done)) => {
+                    if settings.smart && ctl.can_write() {
+                        let _ = ctl.set_fan_profile(FanMode::Auto, None);
+                    }
+                    save_brain(&brain);
+                    let _ = done.send(());
+                    return;
+                }
                 Ok(cmd) => {
                     let was = settings.refresh;
                     let forget = matches!(cmd, Cmd::SmartForget);
@@ -519,7 +537,7 @@ fn spawn_worker<B: EcBackend + 'static>(
 
 fn fan_name(m: FanMode) -> &'static str {
     match m {
-        FanMode::Auto => "Auto",
+        FanMode::Auto => "Factory",
         FanMode::Silent => "Silent",
         FanMode::Basic => "Basic",
         FanMode::Advanced => "Custom",
@@ -567,10 +585,14 @@ fn apply<B: EcBackend>(ctl: &mut Controller<B>, cmd: Cmd, settings: &mut Setting
                     None => errs.push("no matching power plan".into()),
                 }
             }
-            match ctl.set_fan_profile(sc.fan(), settings.curve) {
+            // Balanced and Performance leave the fan to Smart mode
+            let fan = if sc.smart() { ctl.set_fan_profile(FanMode::Advanced, Some(smart::curve_for(50))) } else { ctl.set_fan_profile(sc.fan(), settings.curve) };
+            match fan {
                 Ok(()) => {
-                    settings.fan = Some(sc.fan());
-                    settings.smart = false;
+                    settings.smart = sc.smart();
+                    if !sc.smart() {
+                        settings.fan = Some(sc.fan());
+                    }
                 }
                 Err(e) => errs.push(e.to_string()),
             }
@@ -647,6 +669,8 @@ fn apply<B: EcBackend>(ctl: &mut Controller<B>, cmd: Cmd, settings: &mut Setting
             settings.smart_bias = b.clamp(-6, 6);
             ("Smart mode preference saved".to_string(), Ok(()))
         }
+        // handled by the worker loop itself (it ends the worker)
+        Cmd::HandBack(_) => (String::new(), Ok(())),
         Cmd::SmartForget => {
             *brain = smart::Brain::default();
             ("Smart mode forgot everything it learned".to_string(), Ok(()))
@@ -1069,12 +1093,24 @@ impl App {
         let _ = self.tx.send(cmd);
     }
 
-    /// The fan choices as one control: Auto / Silent / Custom / Smart.
+    /// The fan choices as one control: Smart / Silent / Custom.
+    /// MSI's own curve ("Auto" in MSI's words) is not a choice here: next to
+    /// Smart it only confused, and it is worse. It stays reachable as the
+    /// Factory preset inside Custom, and it is what the laptop runs when the
+    /// app isn't (then nothing is highlighted).
     fn fan_choice(&mut self, ui: &mut Ui, r: Rect, id: &str, st: &Status, smart_on: bool, can_write: bool) {
-        let modes = [FanMode::Auto, FanMode::Silent, FanMode::Advanced];
-        let sel = if smart_on { Some(3) } else { st.fan_mode.ok().and_then(|m| modes.iter().position(|&x| x == m)) };
-        if let Some(i) = segmented(ui, r, Id::new(id), &["Auto", "Silent", "Custom", "Smart"], sel, can_write) {
-            self.send(if i == 3 { Cmd::Smart(true) } else { Cmd::Fan(modes[i]) });
+        let sel = match st.fan_mode {
+            _ if smart_on => Some(0),
+            Ok(FanMode::Silent) => Some(1),
+            Ok(FanMode::Advanced) => Some(2),
+            _ => None,
+        };
+        if let Some(i) = segmented(ui, r, Id::new(id), &["Smart", "Silent", "Custom"], sel, can_write) {
+            self.send(match i {
+                0 => Cmd::Smart(true),
+                1 => Cmd::Fan(FanMode::Silent),
+                _ => Cmd::Fan(FanMode::Advanced),
+            });
         }
     }
 
@@ -1961,7 +1997,7 @@ impl App {
         card_title(p, cool, "Cooling");
         let hint = match &smart_now {
             Some(d) => format!("Smart: {}", d.reason),
-            None => "Auto: MSI's curve  ·  Custom: yours  ·  Smart: learns and decides itself".to_string(),
+            None => "Smart: learns and decides itself  ·  Silent: quietest  ·  Custom: your curve".to_string(),
         };
         p.text(cool.left_bottom() + vec2(18.0, -20.0), Align2::LEFT_CENTER, hint, regular(12.0), if smart_now.is_some() { DIM } else { FAINT });
         let seg_r = Rect::from_min_size(cool.left_top() + vec2(18.0, 46.0), vec2(282.0, 40.0));
@@ -2388,7 +2424,8 @@ impl App {
             let t = Rect::from_min_size(pos2(scen.left() + 18.0 + i as f32 * (tw + GAP), scen.top() + 50.0), vec2(tw, scen.height() - 68.0));
             let plan = sc.plan(plans);
             let active_now = st.is_some_and(|st| {
-                plan.is_some_and(|pl| Some(pl.guid) == active) && st.fan_mode == Ok(sc.fan()) && st.cooler_boost == sc.boost()
+                let fan_ok = if sc.smart() { s.smart } else { !s.smart && st.fan_mode == Ok(sc.fan()) };
+                plan.is_some_and(|pl| Some(pl.guid) == active) && fan_ok && st.cooler_boost == sc.boost()
             });
             let resp = ui.interact(t, Id::new(("scenario", i)), if can_write { Sense::click() } else { Sense::hover() });
             let hover = can_write && resp.hovered();
@@ -2474,18 +2511,26 @@ impl App {
         let r = row(2.0);
         let (slow, fast) = (rates.first().copied().unwrap_or(0), rates.last().copied().unwrap_or(0));
         let can_switch = rates.len() >= 2;
+        // short lines: only ~230 px are free left of the three buttons
         let desc = if !can_switch {
-            "This screen has one refresh rate only".to_string()
+            "Only one rate on this screen".to_string()
         } else {
             match s.refresh {
-                Refresh::Off => format!("Left alone  ·  now {} Hz  ·  screen offers {}", hz.unwrap_or(0), rates.iter().map(u32::to_string).collect::<Vec<_>>().join(" / ")),
-                Refresh::Battery => format!("{slow} Hz on battery, {fast} Hz plugged in  ·  now {} Hz", hz.unwrap_or(0)),
-                Refresh::Adaptive => format!("{slow} Hz on battery, fast for games  ·  now {} Hz", hz.unwrap_or(0)),
+                Refresh::Off => format!("Left alone (offers {})", rates.iter().map(u32::to_string).collect::<Vec<_>>().join(" / ")),
+                Refresh::Battery => format!("{slow} Hz on battery, {fast} plugged in"),
+                Refresh::Adaptive => format!("{slow} Hz on battery, {fast} in games"),
             }
         };
-        p.text(pos2(r.left(), r.center().y - 9.0), Align2::LEFT_CENTER, "Screen refresh", semibold(14.0), TEXT);
-        p.text(pos2(r.left(), r.center().y + 10.0), Align2::LEFT_CENTER, desc, regular(12.0), FAINT);
         let seg = Rect::from_min_size(pos2(r.right() - 222.0, r.center().y - 17.0), vec2(222.0, 34.0));
+        // and never under the buttons, whatever the text
+        let tp = p.with_clip_rect(Rect::from_min_max(pos2(r.left(), r.top() - 4.0), pos2(seg.left() - 10.0, r.bottom() + 4.0)));
+        let title = tp.layout_no_wrap("Screen refresh".into(), semibold(14.0), TEXT);
+        let tw = title.size().x;
+        tp.galley(pos2(r.left(), r.center().y - 9.0 - title.size().y / 2.0), title, TEXT);
+        if let Some(hz) = hz {
+            tp.text(pos2(r.left() + tw + 8.0, r.center().y - 9.0), Align2::LEFT_CENTER, format!("·  {hz} Hz now"), regular(12.0), DIM);
+        }
+        tp.text(pos2(r.left(), r.center().y + 10.0), Align2::LEFT_CENTER, desc, regular(12.0), FAINT);
         let sel = Refresh::ALL.iter().position(|&x| x == s.refresh);
         if let Some(i) = segmented(ui, seg, Id::new("refresh"), &["Off", "Battery", "Adaptive"], sel, can_switch) {
             self.send(Cmd::Refresh(Refresh::ALL[i]));
@@ -2569,6 +2614,14 @@ enum TrayDo {
 }
 
 impl eframe::App for App {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if !self.mock {
+            let (done, wait) = mpsc::channel();
+            self.send(Cmd::HandBack(done));
+            let _ = wait.recv_timeout(Duration::from_secs(2));
+        }
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // tray clicks and menu picks
         let mut todo = Vec::new();
@@ -2598,7 +2651,8 @@ impl eframe::App for App {
                     ctx.send_viewport_cmd(ViewportCommand::Close);
                 }
                 TrayDo::Boost(on) => self.send(Cmd::Boost(on)),
-                TrayDo::Silent(on) => self.send(Cmd::Fan(if on { FanMode::Silent } else { FanMode::Auto })),
+                // unticking Silent goes back to Smart
+                TrayDo::Silent(on) => self.send(if on { Cmd::Fan(FanMode::Silent) } else { Cmd::Smart(true) }),
             }
         }
 
@@ -2660,9 +2714,9 @@ impl eframe::App for App {
             let predicted = root.ctx().input(|i| i.predicted_dt);
             root.ctx().request_repaint_after(Duration::from_secs_f32(1.0 / 60.0 + predicted));
         }
-        // demo: `--smart` shows Smart mode switched on (for screenshots)
-        if self.frames == 1 && self.mock && std::env::args().any(|a| a == "--smart") {
-            self.send(Cmd::Smart(true));
+        // demo: `--custom` shows the curve editor instead of Smart mode (for screenshots)
+        if self.frames == 1 && self.mock && std::env::args().any(|a| a == "--custom") {
+            self.send(Cmd::Fan(FanMode::Advanced));
         }
         if self.frames == 3 {
             win::round_corners();

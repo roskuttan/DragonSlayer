@@ -5,7 +5,7 @@ A small, fast replacement for MSI Dragon Center on the **MSI GF63 Thin 10UC**
 
 ![DragonSlayer](docs/demo-dashboard.png)
 
-More: [Fans](docs/demo-fans.png) · [Tools](docs/demo-tools.png) ·
+More: [Fan, Smart mode](docs/demo-fans.png) · [Fan, curve editor](docs/demo-fans-custom.png) · [Tools](docs/demo-tools.png) ·
 [System](docs/demo-system.png) · [Automation](docs/demo-automation.png)
 (demo mode screenshots, made with `research/shot-demo.ps1`).
 
@@ -20,7 +20,10 @@ More: [Fans](docs/demo-fans.png) · [Tools](docs/demo-tools.png) ·
   one core), nothing when hidden in the tray or minimised
 - Maximise button (or double-click the title bar): the whole layout scales
   up to fill the screen
-- Fan: **Auto / Silent / Custom**, **Cooler Boost** on/off
+- Fan: **Smart / Silent / Custom**, **Cooler Boost** on/off. Smart is the
+  default. MSI's own curve ("Auto" in Dragon Center) is not a menu choice:
+  next to Smart it only confused. It is the Factory preset inside Custom,
+  and the app hands the fan back to it when it quits.
 - **Custom fan curve** (Fan tab): drag 7 bars (hover shows the RPM), or pick
   Quiet / Factory / Cool / Max. Safety: 20–100%, never decreasing, and the
   two hottest steps never below factory (70%, 85%). Auto and Silent put the
@@ -50,7 +53,8 @@ More: [Fans](docs/demo-fans.png) · [Tools](docs/demo-tools.png) ·
 - **Webcam** power on/off (hardware), with a check whether Windows sees a camera
 - **Windows-key lock** for gaming (software hook, while the app runs)
 - **Power plan** switcher (Windows plans: Balanced, Ultimate Performance, ...)
-- **Scenarios** — Silent / Balanced / Performance / Extreme: one click sets
+- **Scenarios** — Silent / Balanced / Performance / Extreme (Balanced and
+  Performance leave the fan to Smart mode): one click sets
   power plan + fans, like Dragon Center's User Scenario page
 - **Battery charge limit**: 60% / 80% / 100%
 - **Keyboard light**: Off / Low / Mid / High
@@ -104,7 +108,7 @@ fan auto|silent | curve quiet|cool|max|38,43,48,54,60,70,85 | webcam on|off |
 boost on|off | charge 60 | kbd 0-3 | power [plan name]` (add
 `--backend pawnio` and run from an admin terminal to use PawnIO).
 
-Tests: `cargo test` (59 tests; Smart mode runs against a simulated laptop).
+Tests: `cargo test` (61 tests; Smart mode runs against a simulated laptop).
 Windows-key lock check without touching the keyboard:
 `cargo run --release --example winkey_check`.
 

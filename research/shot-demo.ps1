@@ -2,9 +2,10 @@
 # Builds a fast (no-LTO) copy of the GUI into a separate folder,
 # opens it once per tab and captures ONLY its own window with PrintWindow.
 # Never touches a running DragonSlayer.
-# Usage: shot-demo.ps1 [-Tabs dashboard,fans,...] [-OutDir docs] [-Smart]
-# -Smart: with Smart fan mode switched on (files get a -smart suffix).
-param([string[]]$Tabs = @('dashboard', 'fans', 'tools', 'system', 'automation'), [string]$OutDir, [switch]$Smart)
+# Usage: shot-demo.ps1 [-Tabs dashboard,fans,...] [-OutDir docs] [-Custom]
+# The demo starts in Smart mode. -Custom: with the Custom fan mode
+# instead, to show the curve editor (files get a -custom suffix).
+param([string[]]$Tabs = @('dashboard', 'fans', 'tools', 'system', 'automation'), [string]$OutDir, [switch]$Custom)
 $root = Split-Path $PSScriptRoot -Parent
 if (-not $OutDir) { $OutDir = Join-Path $root 'docs' }
 $target = Join-Path $root 'target\demo'
@@ -29,7 +30,7 @@ public static class DemoShot {
 '@
 [DemoShot]::SetProcessDPIAware() | Out-Null
 foreach ($t in $Tabs) {
-  $a = @('--mock', '--tab', $t); if ($Smart) { $a += '--smart' }
+  $a = @('--mock', '--tab', $t); if ($Custom) { $a += '--custom' }
   $p = Start-Process $exe -ArgumentList $a -PassThru
   for ($i = 0; $i -lt 20 -and $p.MainWindowHandle -eq 0; $i++) { Start-Sleep -Milliseconds 500; $p.Refresh() }
   Start-Sleep -Seconds 5
@@ -40,7 +41,7 @@ foreach ($t in $Tabs) {
   $hdc = $g.GetHdc()
   [DemoShot]::PrintWindow($h, $hdc, 2) | Out-Null
   $g.ReleaseHdc($hdc)
-  $out = Join-Path $OutDir "demo-$t$(if ($Smart) { '-smart' }).png"
+  $out = Join-Path $OutDir "demo-$t$(if ($Custom) { '-custom' }).png"
   $bmp.Save($out, [Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $bmp.Dispose()
   Stop-Process -Id $p.Id -Force
   "$t -> $out"

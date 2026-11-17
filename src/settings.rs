@@ -211,10 +211,26 @@ impl Settings {
     pub fn load_checked() -> (Self, Option<String>) {
         let Some(p) = Self::path() else { return (Self::default(), None) };
         match std::fs::read_to_string(&p) {
-            Ok(t) => (Self::parse(&t), None),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Self::default(), None),
+            Ok(t) => (Self::from_file(&t), None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Self::first_run(), None),
             Err(e) => (Self::default(), Some(format!("{}: {e}", p.display()))),
         }
+    }
+
+    /// What the app starts with when nothing has been chosen: Smart fan mode.
+    pub fn first_run() -> Self {
+        Self { smart: true, ..Self::default() }
+    }
+
+    /// A settings file's content. If it never chose how to run the fan (no
+    /// `fan=` and no `smart=` line), Smart mode it is.
+    pub fn from_file(text: &str) -> Self {
+        let mut s = Self::parse(text);
+        let chose = text.lines().any(|l| l.trim_start().starts_with("fan=") || l.trim_start().starts_with("smart="));
+        if !chose {
+            s.smart = true;
+        }
+        s
     }
 
     pub fn save(&self) -> std::io::Result<()> {
@@ -281,6 +297,22 @@ mod tests {
     use super::*;
     use crate::ec::backend::MockEc;
     use crate::ec::map;
+
+    #[test]
+    fn smart_is_the_default_until_the_fan_is_chosen() {
+        assert!(Settings::first_run().smart);
+        assert!(Settings::from_file("kbd=2
+heat_protect=on
+").smart, "fan never chosen: Smart");
+        assert!(!Settings::from_file("fan=silent
+").smart, "a chosen fan mode is kept");
+        assert!(!Settings::from_file("smart=off
+kbd=1
+").smart, "Smart switched off stays off");
+        assert!(Settings::from_file("smart=on
+fan=custom
+").smart);
+    }
 
     #[test]
     fn write_file_replaces_and_survives_a_read_only_old_file() {
