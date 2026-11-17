@@ -12,6 +12,7 @@ pub mod icon;
 #[cfg(windows)]
 pub mod power;
 pub mod settings;
+pub mod smart;
 #[cfg(windows)]
 pub mod sysinfo;
 #[cfg(windows)]
