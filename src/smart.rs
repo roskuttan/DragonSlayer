@@ -166,8 +166,14 @@ impl Brain {
     /// learned cell plus the prior's slope; with nothing learned, the prior.
     /// A faster fan is never expected to be hotter.
     pub fn estimates(&self, level: usize) -> [f32; STEPS] {
+        estimate_row(&self.map[level], level)
+    }
+}
+
+/// See `Brain::estimates`: one row of a map (also used to draw it).
+pub fn estimate_row(row: &[Cell; STEPS], level: usize) -> [f32; STEPS] {
+    {
         let prior = |f: usize| PRIOR_AT_50[level] - PRIOR_GAIN[level] * (f32::from(step_pct(f)) - 50.0) / 10.0;
-        let row = &self.map[level];
         let mut est = [0.0; STEPS];
         for f in 0..STEPS {
             let lo = (0..f).rev().find(|&k| row[k].known());
@@ -184,7 +190,9 @@ impl Brain {
         }
         est
     }
+}
 
+impl Brain {
     /// Slowest speed expected to stay under `target` at this load level;
     /// stops climbing where more fan no longer buys anything. Going below
     /// the current speed needs a degree of margin, so it doesn't flip-flop.

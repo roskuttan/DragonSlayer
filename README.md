@@ -26,6 +26,21 @@ More: [Fans](docs/demo-fans.png) · [Tools](docs/demo-tools.png) ·
   two hottest steps never below factory (70%, 85%). Auto and Silent put the
   factory curve back. The presets are tuned from a measurement of this
   laptop (see "Fan measurement" in docs/how-dragon-center-works.md).
+- **Smart fan mode** (Fan tab, or Cooling → Smart): the app sets the fan
+  itself and keeps learning. It learns a map of this laptop (the
+  temperature each fan speed gives at each load level) and never stops
+  updating it, so it follows dust, room temperature and ageing. It acts on
+  load before the heat arrives, ignores short spikes, keeps going after
+  load until the stored heat is gone, and remembers which programs are
+  heavy so it can spin up the moment one comes to the front. The panel
+  shows what it is doing and why, and the learned map. A Quieter / Balanced
+  / Cooler choice shifts its target. Learned data: `%APPDATA%\DragonSlayer\
+  learned.txt` (program names stay on this PC; "Forget" wipes it).
+- **Screen refresh** (Automation tab): Off / Battery (slow rate on battery,
+  fast plugged in) / Adaptive (also fast on battery while the graphics chip
+  is busy, i.e. a game). This panel offers 48 and 144 Hz only and has no
+  variable refresh, so switches are rare: the wanted rate must hold 5 s and
+  switches are 20 s apart.
 - **Webcam** power on/off (hardware), with a check whether Windows sees a camera
 - **Windows-key lock** for gaming (software hook, while the app runs)
 - **Power plan** switcher (Windows plans: Balanced, Ultimate Performance, ...)
@@ -83,7 +98,7 @@ fan auto|silent | curve quiet|cool|max|38,43,48,54,60,70,85 | webcam on|off |
 boost on|off | charge 60 | kbd 0-3 | power [plan name]` (add
 `--backend pawnio` and run from an admin terminal to use PawnIO).
 
-Tests: `cargo test` (42 tests).
+Tests: `cargo test` (56 tests; Smart mode runs against a simulated laptop).
 Windows-key lock check without touching the keyboard:
 `cargo run --release --example winkey_check`.
 
@@ -124,7 +139,10 @@ DragonSlayer  ──PawnIO (signed driver)──►  EC ports 0x62/0x66  ──�
 | Shift mode | `0xF2` | **blocked** — Dragon Center never uses it here |
 | Settings restore | — | **works**: re-applied the saved keyboard level on start |
 | Dragon Center removed | — | everything above re-checked through PawnIO afterwards |
-| Start with Windows, tray, scenarios | — | built, not yet tried on this PC |
+| Start with Windows | — | **works**: started hidden in the tray after the 2026-11-17 restart |
+| Smart fan mode | `0x72–0x78`, `0x8A–0x90` | built; tested only against a simulated laptop, **not yet run on this PC** |
+| Screen refresh switching | Windows API | reads this screen (48 / 144 Hz); **switching not yet tried on this PC** |
+| Tray, scenarios | — | built, not yet tried on this PC |
 
 ## Uninstalling Dragon Center
 
@@ -159,6 +177,8 @@ src/ec/winio.rs      MSI WinIO backend (fallback while Dragon Center exists)
 src/controller.rs    safety layer: firmware gate, allowlist, read-back
 src/settings.rs      saved settings, re-applied on start
 src/automation.rs    heat protection, on-battery profile (unit-tested)
+src/smart.rs         Smart fan mode: the learning brain (pure logic, simulated-laptop tests)
+src/display.rs       screen refresh rates and when to switch
 src/power.rs         Windows power plans
 src/winkey.rs        Windows-key lock (keyboard hook)
 src/sysinfo.rs       CPU / RAM / GPU / battery health / camera check

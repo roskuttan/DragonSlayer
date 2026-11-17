@@ -375,3 +375,48 @@ pub fn battery() -> Option<Battery> {
         })
     }
 }
+
+// ------------------------------------------------------- program in front
+
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn GetForegroundWindow() -> *mut c_void;
+    fn GetWindowThreadProcessId(hwnd: *mut c_void, pid: *mut u32) -> u32;
+}
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+    fn QueryFullProcessImageNameW(process: *mut c_void, flags: u32, name: *mut u16, size: *mut u32) -> i32;
+    #[link_name = "CloseHandle"]
+    fn CloseProcessHandle(h: *mut c_void) -> i32;
+}
+
+/// File name of the program whose window is in front, lower case
+/// ("game.exe"). None for the desktop or if it can't be read.
+pub fn foreground_app() -> Option<String> {
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    let mut pid = 0u32;
+    let mut buf = [0u16; 520];
+    let mut len = buf.len() as u32;
+    // SAFETY: plain queries; the buffer is passed with its length; the
+    // process handle is closed again.
+    let ok = unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_null() || GetWindowThreadProcessId(hwnd, &mut pid) == 0 || pid == 0 {
+            return None;
+        }
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return None;
+        }
+        let ok = QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len) != 0;
+        CloseProcessHandle(h);
+        ok
+    };
+    if !ok {
+        return None;
+    }
+    let path = String::from_utf16_lossy(&buf[..len as usize]);
+    let name = path.rsplit(['\\', '/']).next()?.to_lowercase();
+    (!name.is_empty()).then_some(name)
+}

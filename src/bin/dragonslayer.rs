@@ -25,8 +25,8 @@ use dragonslayer::ec::backend::{EcBackend, EcError, EcResult, MockEc};
 use dragonslayer::ec::map::{ChargeLimit, FanCurve, FanMode, KbdBacklight, CURVE_POINTS};
 use dragonslayer::ec::open_hardware;
 use dragonslayer::power::{self, Level};
-use dragonslayer::settings::{HEAT_LIMITS, Settings};
-use dragonslayer::{sysinfo, winkey};
+use dragonslayer::settings::{HEAT_LIMITS, Refresh, Settings};
+use dragonslayer::{display, smart, sysinfo, winkey};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
@@ -101,6 +101,13 @@ enum Cmd {
     BatteryQuiet(bool),
     BatteryKbdOff(bool),
     CloseToTray(bool),
+    /// Smart fan mode on / off
+    Smart(bool),
+    /// Smart mode preference in degrees (+ quieter, - cooler)
+    SmartBias(i8),
+    /// Throw away everything Smart mode has learned
+    SmartForget,
+    Refresh(Refresh),
 }
 
 /// One-click presets, like Dragon Center's "User Scenario" page.
@@ -180,7 +187,51 @@ struct Shared {
     plans: Vec<power::Plan>,
     active_plan: Option<power::Guid>,
     camera: bool,
+    /// Smart fan mode: what it decided this second (None while it is off)
+    smart: Option<smart::Decision>,
+    brain: BrainView,
+    /// screen refresh rate now, and the rates the screen offers
+    hz: Option<u32>,
+    rates: Vec<u32>,
 }
+
+/// What the Smart panel shows of the learned data.
+#[derive(Clone, Default)]
+struct BrainView {
+    map: [[smart::Cell; smart::STEPS]; smart::LOADS],
+    /// (program, usual load level, hours seen), heaviest first
+    apps: Vec<(String, usize, f32)>,
+    learned_secs: f64,
+    drift_c: Option<f32>,
+}
+
+impl BrainView {
+    fn of(b: &smart::Brain) -> Self {
+        Self { map: b.map, apps: b.known_apps(), learned_secs: b.learned_secs, drift_c: b.drift_c() }
+    }
+}
+
+/// Demo mode: a few hours of made-up learning, so the Smart panel has
+/// something to show.
+const DEMO_LEARNED: &str = "v1
+learned_secs 15120
+cell 0 0 67.8 400 67.2
+cell 0 1 66.9 40 66.5
+cell 1 0 70.9 220 70.1
+cell 1 1 69.6 60 69.6
+cell 1 2 68.8 12 0
+cell 2 3 78.1 90 77.5
+cell 2 4 76.6 150 76.0
+cell 2 5 75.4 30 75.4
+cell 2 7 73.9 14 0
+cell 3 6 86.2 80 85.1
+cell 3 7 84.0 200 83.2
+cell 4 7 90.3 45 89.8
+app 9200 78 valorant.exe
+app 5400 66 blender.exe
+app 30000 24 code.exe
+app 80000 11 chrome.exe
+";
 
 /// `open` connects to the hardware and names the backend. If connecting
 /// fails, the worker keeps retrying every 2 seconds instead of giving up.
@@ -226,11 +277,36 @@ fn spawn_worker<B: EcBackend + 'static>(
 
         let mut auto = Automation::default();
         auto.prime(sysinfo::power().map(|p| p.0));
+        // Smart fan mode: what it has learned so far (kept next to the settings)
+        let learned_path = if persist { Settings::learned_path() } else { None };
+        let mut brain = match &learned_path {
+            Some(p) => std::fs::read_to_string(p).map(|t| smart::Brain::parse(&t)).unwrap_or_default(),
+            None => smart::Brain::parse(DEMO_LEARNED),
+        };
+        let mut brain_saved = Instant::now();
+        let save_brain = |b: &smart::Brain| {
+            if let Some(p) = &learned_path {
+                let _ = std::fs::write(p, b.to_text());
+            }
+        };
+        let (mut cpu_load, mut gpu_load) = (0.0f32, 0.0f32);
+        let mut last_tick = Instant::now();
+        let mut switcher = display::Switcher::default();
+        let screen_rates = if persist { display::rates() } else { vec![48, 144] };
         let mut tick: u32 = 0;
         loop {
             match rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(cmd) => {
-                    let (what, result) = apply(&mut ctl, cmd, &mut settings, persist);
+                    let was = settings.refresh;
+                    let forget = matches!(cmd, Cmd::SmartForget);
+                    let (what, result) = apply(&mut ctl, cmd, &mut settings, &mut brain, persist);
+                    if forget {
+                        save_brain(&brain);
+                    }
+                    // refresh switching turned off: give the fastest rate back
+                    if persist && was != Refresh::Off && settings.refresh == Refresh::Off && let Some(&fast) = screen_rates.last() {
+                        let _ = display::set_hz(fast);
+                    }
                     if result.is_ok() && persist {
                         let _ = settings.save();
                     }
@@ -272,7 +348,9 @@ fn spawn_worker<B: EcBackend + 'static>(
             // automation: heat protection, on-battery profile
             let mut auto_msg = None;
             if let (Ok(st), true) = (&status, ctl.can_write()) {
-                let actions = auto.tick(&settings, st, power.map(|p| p.0));
+                let mut actions = auto.tick(&settings, st, power.map(|p| p.0));
+                // Smart mode handles battery itself: no switch to Silent
+                actions.retain(|(a, _)| !(settings.smart && matches!(a, Action::Fan(_))));
                 for (act, why) in &actions {
                     let r: EcResult<()> = match act {
                         Action::Boost(b) => ctl.set_cooler_boost(*b),
@@ -293,7 +371,62 @@ fn spawn_worker<B: EcBackend + 'static>(
                 }
             }
 
+            // Smart fan mode: one decision a second; write the curve only
+            // when the laptop's doesn't match it
+            let dt = last_tick.elapsed().as_secs_f32();
+            last_tick = Instant::now();
+            if let Some(c) = cpu_pct {
+                cpu_load = c;
+            }
+            if let Some(Some(g)) = &gpu {
+                gpu_load = g.util_pct;
+            }
+            let mut decision = None;
+            if settings.smart && let Ok(st) = &status {
+                let sample = smart::Sample {
+                    cpu_temp: f32::from(st.cpu_temp_c),
+                    gpu_temp: f32::from(st.gpu_temp_c),
+                    cpu_load,
+                    gpu_load,
+                    on_battery: power.is_some_and(|p| !p.0),
+                    app: if persist { sysinfo::foreground_app() } else { Some("chrome.exe".into()) },
+                };
+                let d = brain.tick(&sample, dt, f32::from(settings.smart_bias));
+                let want = smart::curve_for(d.fan_pct);
+                let differs = st.fan_mode != Ok(FanMode::Advanced) || st.cpu_curve != want.speeds() || st.gpu_curve != want.speeds();
+                decision = Some(d);
+                if differs && ctl.can_write() {
+                    match ctl.set_fan_profile(FanMode::Advanced, Some(want)) {
+                        Ok(()) => status = ctl.status(),
+                        Err(e) => auto_msg = Some((format!("Smart mode: {e}"), false)),
+                    }
+                }
+                if brain_saved.elapsed() >= Duration::from_secs(120) {
+                    save_brain(&brain);
+                    brain_saved = Instant::now();
+                }
+            }
+
+            // screen refresh rate by situation
+            let hz = if persist { display::current_hz() } else { Some(144) };
+            if persist && let (Some(cur), Some((plugged, _))) = (hz, power)
+                && let Some(to) = switcher.decide(settings.refresh, &screen_rates, cur, plugged, gpu_load >= 35.0, dt)
+            {
+                auto_msg = Some(match display::set_hz(to) {
+                    Ok(()) => (format!("Screen: {to} Hz ({})", if plugged { "plugged in" } else if to == screen_rates[0] { "on battery" } else { "game on battery" }), true),
+                    Err(e) => (format!("Screen refresh: {e}"), false),
+                });
+            }
+
             let mut s = shared.lock().unwrap();
+            s.smart = decision;
+            if settings.smart || tick.is_multiple_of(10) {
+                s.brain = BrainView::of(&brain);
+            }
+            s.hz = hz;
+            if s.rates.is_empty() {
+                s.rates.clone_from(&screen_rates);
+            }
             if let Some(dc) = dc {
                 s.dragon_center_running = dc;
             }
@@ -351,13 +484,14 @@ fn fan_name(m: FanMode) -> &'static str {
 
 /// Applies a command and, on success, records it in `settings`.
 /// `real` is false in demo mode: nothing outside the fake EC is touched.
-fn apply<B: EcBackend>(ctl: &mut Controller<B>, cmd: Cmd, settings: &mut Settings, real: bool) -> (String, Result<(), String>) {
+fn apply<B: EcBackend>(ctl: &mut Controller<B>, cmd: Cmd, settings: &mut Settings, brain: &mut smart::Brain, real: bool) -> (String, Result<(), String>) {
     let r = |x: EcResult<()>| x.map_err(|e| e.to_string());
     match cmd {
         Cmd::Fan(m) => {
             let res = r(ctl.set_fan_profile(m, settings.curve));
             if res.is_ok() {
                 settings.fan = Some(m);
+                settings.smart = false;
             }
             (format!("Fan set to {}", fan_name(m)), res)
         }
@@ -365,6 +499,7 @@ fn apply<B: EcBackend>(ctl: &mut Controller<B>, cmd: Cmd, settings: &mut Setting
             let res = r(ctl.set_fan_profile(FanMode::Advanced, Some(c)));
             if res.is_ok() {
                 settings.fan = Some(FanMode::Advanced);
+                settings.smart = false;
                 settings.curve = Some(c);
             }
             ("Custom fan curve applied".to_string(), res)
@@ -389,7 +524,10 @@ fn apply<B: EcBackend>(ctl: &mut Controller<B>, cmd: Cmd, settings: &mut Setting
                 }
             }
             match ctl.set_fan_profile(sc.fan(), settings.curve) {
-                Ok(()) => settings.fan = Some(sc.fan()),
+                Ok(()) => {
+                    settings.fan = Some(sc.fan());
+                    settings.smart = false;
+                }
                 Err(e) => errs.push(e.to_string()),
             }
             match ctl.set_cooler_boost(sc.boost()) {
@@ -442,6 +580,35 @@ fn apply<B: EcBackend>(ctl: &mut Controller<B>, cmd: Cmd, settings: &mut Setting
         Cmd::CloseToTray(on) => {
             settings.close_to_tray = on;
             (format!("Close to tray {}", if on { "on" } else { "off" }), Ok(()))
+        }
+        Cmd::Smart(on) => {
+            let res = if on {
+                r(ctl.set_fan_profile(FanMode::Advanced, Some(smart::curve_for(50))))
+            } else {
+                // back to what the user had before
+                r(ctl.set_fan_profile(settings.fan.unwrap_or(FanMode::Auto), settings.curve))
+            };
+            if res.is_ok() {
+                settings.smart = on;
+            }
+            (format!("Smart fan mode {}", if on { "on" } else { "off" }), res)
+        }
+        Cmd::SmartBias(b) => {
+            settings.smart_bias = b.clamp(-6, 6);
+            ("Smart mode preference saved".to_string(), Ok(()))
+        }
+        Cmd::SmartForget => {
+            *brain = smart::Brain::default();
+            ("Smart mode forgot everything it learned".to_string(), Ok(()))
+        }
+        Cmd::Refresh(p) => {
+            settings.refresh = p;
+            let what = match p {
+                Refresh::Off => "Screen refresh: left alone",
+                Refresh::Battery => "Screen refresh: slow on battery",
+                Refresh::Adaptive => "Screen refresh: adaptive",
+            };
+            (what.to_string(), Ok(()))
         }
     }
 }
@@ -850,6 +1017,112 @@ impl App {
 
     fn send(&self, cmd: Cmd) {
         let _ = self.tx.send(cmd);
+    }
+
+    /// The fan choices as one control: Auto / Silent / Custom / Smart.
+    fn fan_choice(&mut self, ui: &mut Ui, r: Rect, id: &str, st: &Status, smart_on: bool, can_write: bool) {
+        let modes = [FanMode::Auto, FanMode::Silent, FanMode::Advanced];
+        let sel = if smart_on { Some(3) } else { st.fan_mode.ok().and_then(|m| modes.iter().position(|&x| x == m)) };
+        if let Some(i) = segmented(ui, r, Id::new(id), &["Auto", "Silent", "Custom", "Smart"], sel, can_write) {
+            self.send(if i == 3 { Cmd::Smart(true) } else { Cmd::Fan(modes[i]) });
+        }
+    }
+
+    /// Smart mode's panel: what it is doing and why, and what it has learned.
+    fn smart_panel(&mut self, ui: &mut Ui, p: &Painter, ed: Rect, s: &Settings, can_write: bool) {
+        let (now, bv) = {
+            let sh = self.shared.lock().unwrap();
+            (sh.smart.clone(), sh.brain.clone())
+        };
+        card_title(p, ed, "Smart mode");
+        p.text(ed.left_top() + vec2(18.0, 38.0), Align2::LEFT_TOP, "Learns this laptop and sets the fan itself", regular(12.0), FAINT);
+        let pr = Rect::from_min_size(pos2(ed.right() - 18.0 - 300.0, ed.top() + 14.0), vec2(300.0, 34.0));
+        let psel = match s.smart_bias {
+            b if b > 1 => 0,
+            b if b < -1 => 2,
+            _ => 1,
+        };
+        if let Some(i) = segmented(ui, pr, Id::new("smart_bias"), &["Quieter", "Balanced", "Cooler"], Some(psel), true) {
+            self.send(Cmd::SmartBias([4, 0, -4][i]));
+        }
+
+        // right now: speed and the reason, in plain words
+        let nowr = Rect::from_min_size(ed.left_top() + vec2(18.0, 68.0), vec2(ed.width() - 36.0, 62.0));
+        p.rect_filled(nowr, 10.0, WELL);
+        p.rect_stroke(nowr, 10.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
+        match &now {
+            Some(d) => {
+                let g = p.layout_no_wrap(format!("{}%", d.fan_pct), bold(26.0), TEXT);
+                let (gw, gh) = (g.size().x, g.size().y);
+                p.galley(pos2(nowr.left() + 16.0, nowr.center().y - gh / 2.0), g, TEXT);
+                let tx = nowr.left() + 16.0 + gw.max(62.0) + 14.0;
+                p.text(pos2(tx, nowr.top() + 21.0), Align2::LEFT_CENTER, &d.reason, semibold(13.5), TEXT);
+                let rpm = (f32::from(d.fan_pct) * FanCurve::RPM_PER_PCT / 10.0).round() as u32 * 10;
+                let line = format!("steering by {:.0}°C  ·  aiming to stay under {:.0}°C  ·  about {} RPM", d.heat_c, d.target_c, thousands(rpm));
+                p.text(pos2(tx, nowr.top() + 42.0), Align2::LEFT_CENTER, line, regular(12.0), DIM);
+            }
+            None => {
+                p.text(nowr.center(), Align2::CENTER_CENTER, if can_write { "Starting..." } else { "Read-only: Smart mode can't set the fan" }, regular(12.5), FAINT);
+            }
+        }
+
+        // the learned map: load level (rows) x fan speed (columns) -> temperature
+        let top = nowr.bottom() + 34.0;
+        p.text(pos2(ed.left() + 18.0, nowr.bottom() + 17.0), Align2::LEFT_CENTER, "WHAT IT HAS LEARNED", semibold(10.5), FAINT);
+        p.text(pos2(ed.left() + 150.0, nowr.bottom() + 17.0), Align2::LEFT_CENTER, "temperature at each load and fan speed  ·  faint = its guess", regular(11.5), FAINT);
+        let (x0, cw, ch, gap) = (ed.left() + 18.0 + 62.0, 46.0, 30.0, 4.0);
+        let cur = now.as_ref().map(|d| (d.load_level, (usize::from(d.fan_pct.saturating_sub(30)) / 10).min(smart::STEPS - 1)));
+        for level in 0..smart::LOADS {
+            let y = top + (smart::LOADS - 1 - level) as f32 * (ch + gap);
+            p.text(pos2(x0 - 10.0, y + ch / 2.0), Align2::RIGHT_CENTER, smart::LOAD_NAMES[level], regular(11.5), DIM);
+            let est = smart::estimate_row(&bv.map[level], level);
+            for (f, guess) in est.iter().enumerate() {
+                let r = Rect::from_min_size(pos2(x0 + f as f32 * (cw + gap), y), vec2(cw, ch));
+                let cell = bv.map[level][f];
+                if cell.known() {
+                    let col = heat(temp_frac(cell.temp));
+                    p.rect_filled(r, 6.0, col.gamma_multiply(0.22));
+                    p.text(r.center(), Align2::CENTER_CENTER, format!("{:.0}°", cell.temp), semibold(12.0), mix(col, TEXT, 0.55));
+                } else {
+                    p.rect_stroke(r, 6.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
+                    // a guess far off the scale just means "too hot": say so
+                    let txt = if *guess > 95.0 { "95°+".to_string() } else { format!("{guess:.0}°") };
+                    p.text(r.center(), Align2::CENTER_CENTER, txt, regular(11.0), FAINT.gamma_multiply(0.7));
+                }
+                if cur == Some((level, f)) {
+                    p.rect_stroke(r.expand(1.5), 7.0, Stroke::new(1.6, TEXT), StrokeKind::Inside);
+                }
+            }
+        }
+        let ly = top + smart::LOADS as f32 * (ch + gap) + 8.0;
+        for f in 0..smart::STEPS {
+            p.text(pos2(x0 + f as f32 * (cw + gap) + cw / 2.0, ly), Align2::CENTER_CENTER, format!("{}%", smart::step_pct(f)), regular(10.5), FAINT);
+        }
+
+        // what it knows, in numbers
+        let sx = x0 + smart::STEPS as f32 * (cw + gap) + 22.0;
+        let hours = bv.learned_secs / 3600.0;
+        let learning = if hours >= 1.0 { format!("{hours:.1} h") } else { format!("{:.0} min", bv.learned_secs / 60.0) };
+        let known = bv.map.iter().flatten().filter(|c| c.known()).count();
+        let (cooling, ccol) = match bv.drift_c {
+            Some(d) if d > 3.0 => (format!("{d:.0}°C hotter"), WARM),
+            Some(d) if d < -3.0 => (format!("{:.0}°C cooler", -d), COOL),
+            Some(_) => ("As first learned".to_string(), TEXT),
+            None => ("Too early to say".to_string(), DIM),
+        };
+        let heavy: Vec<String> = bv.apps.iter().filter(|a| a.1 >= 2).take(2).map(|a| a.0.trim_end_matches(".exe").to_string()).collect();
+        let heavy = if heavy.is_empty() { "None yet".to_string() } else { heavy.join(", ") };
+        let rows = [("LEARNING FOR", learning, TEXT), ("MAP", format!("{known} of {} known", smart::LOADS * smart::STEPS), TEXT), ("COOLING NOW", cooling, ccol), ("HEAVY PROGRAMS", heavy, TEXT)];
+        for (k, (label, value, col)) in rows.iter().enumerate() {
+            field(p, pos2(sx, top - 4.0 + k as f32 * 44.0), label, value, *col);
+        }
+
+        let by = ed.bottom() - 30.0;
+        status_line(p, pos2(ed.left() + 18.0, by), "Always learning: it follows dust, room temperature and how you use the laptop", DIM);
+        let forget = Rect::from_min_size(pos2(ed.right() - 18.0 - 96.0, by - 17.0), vec2(96.0, 34.0));
+        if button(ui, forget, "smart_forget", "Forget", false, bv.learned_secs > 0.0 || !bv.apps.is_empty()) {
+            self.send(Cmd::SmartForget);
+        }
     }
 
     fn toggle_autostart(&mut self) {
@@ -1582,6 +1855,10 @@ impl App {
         let bat = Rect::from_min_size(pos2(rx, row2), vec2(cw, 130.0));
         let kbd = Rect::from_min_size(pos2(rx + cw + GAP, row2), vec2(cw, 130.0));
 
+        let (smart_on, smart_now) = {
+            let s = self.shared.lock().unwrap();
+            (s.settings.smart, s.smart.clone())
+        };
         // [ CPU gauge ][ the one fan ][ GPU gauge ]
         card(p, hero);
         let now = ui.ctx().input(|i| i.time);
@@ -1612,6 +1889,8 @@ impl App {
         // mode chip
         let (mode, col) = if st.cooler_boost {
             ("COOLER BOOST".to_string(), ACCENT)
+        } else if smart_on {
+            (format!("SMART  ·  {}%", smart_now.as_ref().map_or(0, |d| d.fan_pct)), COOL)
         } else {
             (st.fan_mode.map_or("FAN", fan_name).to_uppercase(), DIM)
         };
@@ -1630,13 +1909,13 @@ impl App {
         // cooling
         card(p, cool);
         card_title(p, cool, "Cooling");
-        p.text(cool.left_bottom() + vec2(18.0, -20.0), Align2::LEFT_CENTER, "Auto: MSI's curve  ·  Silent: quietest  ·  Custom: your curve (Fan tab)", regular(12.0), FAINT);
-        let modes = [FanMode::Auto, FanMode::Silent, FanMode::Advanced];
-        let fan_sel = st.fan_mode.ok().and_then(|m| modes.iter().position(|&x| x == m));
-        let seg_r = Rect::from_min_size(cool.left_top() + vec2(18.0, 46.0), vec2(270.0, 40.0));
-        if let Some(i) = segmented(ui, seg_r, Id::new("fan"), &["Auto", "Silent", "Custom"], fan_sel, can_write) {
-            self.send(Cmd::Fan(modes[i]));
-        }
+        let hint = match &smart_now {
+            Some(d) => format!("Smart: {}", d.reason),
+            None => "Auto: MSI's curve  ·  Custom: yours  ·  Smart: learns and decides itself".to_string(),
+        };
+        p.text(cool.left_bottom() + vec2(18.0, -20.0), Align2::LEFT_CENTER, hint, regular(12.0), if smart_now.is_some() { DIM } else { FAINT });
+        let seg_r = Rect::from_min_size(cool.left_top() + vec2(18.0, 46.0), vec2(282.0, 40.0));
+        self.fan_choice(ui, seg_r, "fan", st, smart_on, can_write);
         let sw = Rect::from_min_size(pos2(cool.right() - 18.0 - 52.0, seg_r.center().y - 14.0), vec2(52.0, 28.0));
         p.text(pos2(sw.left() - 14.0, seg_r.center().y - 9.0), Align2::RIGHT_CENTER, "Cooler Boost", semibold(14.0), TEXT);
         p.text(pos2(sw.left() - 14.0, seg_r.center().y + 10.0), Align2::RIGHT_CENTER, "Fan at full speed", regular(12.0), FAINT);
@@ -1822,6 +2101,11 @@ impl App {
             card(p, r);
         }
 
+        let cpu_step = curve_step(&st.cpu_curve_temps, st.cpu_temp_c);
+        let gpu_step = curve_step(&st.gpu_curve_temps, st.gpu_temp_c);
+        if s.smart {
+            self.smart_panel(ui, p, ed, s, can_write);
+        } else {
         // ---- editor
         card_title(p, ed, "Fan curve");
         p.text(ed.left_top() + vec2(18.0, 38.0), Align2::LEFT_TOP, "Drag the bars  ·  CPU + GPU  ·  grey line = lowest allowed", regular(12.0), FAINT);
@@ -1937,15 +2221,14 @@ impl App {
             }
         }
 
+        } // (curve editor)
+
         // ---- fan mode
         card_title(p, mode_r, "Fan mode");
-        let modes = [FanMode::Auto, FanMode::Silent, FanMode::Advanced];
-        let sel = st.fan_mode.ok().and_then(|m| modes.iter().position(|&x| x == m));
         let seg = Rect::from_min_size(mode_r.left_top() + vec2(18.0, 46.0), vec2(side_w - 36.0, 38.0));
-        if let Some(i) = segmented(ui, seg, Id::new("fan2"), &["Auto", "Silent", "Custom"], sel, can_write) {
-            self.send(Cmd::Fan(modes[i]));
-        }
+        self.fan_choice(ui, seg, "fan2", st, s.smart, can_write);
         let desc = match st.fan_mode {
+            _ if s.smart => "Learns your laptop and sets the speed itself",
             Ok(FanMode::Auto) => "MSI's factory curve",
             Ok(FanMode::Silent) => "Quietest; the laptop runs warmer",
             Ok(FanMode::Advanced) => "Your curve on the left",
@@ -2124,14 +2407,39 @@ impl App {
 
         // when unplugged
         card_title(p, unplug, "When unplugged");
-        let row = |i: f32| Rect::from_min_size(pos2(unplug.left() + 18.0, unplug.top() + 50.0 + i * 54.0), vec2(unplug.width() - 36.0, 44.0));
-        if switch_row(ui, p, row(0.0), "bat_quiet", "Quiet fan", "Fan switches to Silent on battery", s.battery_quiet, true) {
+        p.text(pos2(unplug.right() - 18.0, unplug.top() + 27.0), Align2::RIGHT_CENTER, "plugging in puts your settings back", regular(11.5), FAINT);
+        let row = |i: f32| Rect::from_min_size(pos2(unplug.left() + 18.0, unplug.top() + 50.0 + i * 50.0), vec2(unplug.width() - 36.0, 44.0));
+        let quiet_desc = if s.smart { "Not needed: Smart mode leans quiet on battery" } else { "Fan switches to Silent on battery" };
+        if switch_row(ui, p, row(0.0), "bat_quiet", "Quiet fan", quiet_desc, s.battery_quiet, !s.smart) {
             self.send(Cmd::BatteryQuiet(!s.battery_quiet));
         }
         if switch_row(ui, p, row(1.0), "bat_kbd", "Keyboard light off", "Saves power on battery", s.battery_kbd_off, true) {
             self.send(Cmd::BatteryKbdOff(!s.battery_kbd_off));
         }
-        p.text(pos2(unplug.left() + 18.0, unplug.bottom() - 24.0), Align2::LEFT_CENTER, "Plugging back in restores your own settings.", regular(12.0), FAINT);
+        // screen refresh rate: slow on battery, fast when it matters
+        let (hz, rates) = {
+            let sh = self.shared.lock().unwrap();
+            (sh.hz, sh.rates.clone())
+        };
+        let r = row(2.0);
+        let (slow, fast) = (rates.first().copied().unwrap_or(0), rates.last().copied().unwrap_or(0));
+        let can_switch = rates.len() >= 2;
+        let desc = if !can_switch {
+            "This screen has one refresh rate only".to_string()
+        } else {
+            match s.refresh {
+                Refresh::Off => format!("Left alone  ·  now {} Hz  ·  screen offers {}", hz.unwrap_or(0), rates.iter().map(u32::to_string).collect::<Vec<_>>().join(" / ")),
+                Refresh::Battery => format!("{slow} Hz on battery, {fast} Hz plugged in  ·  now {} Hz", hz.unwrap_or(0)),
+                Refresh::Adaptive => format!("{slow} Hz on battery, fast for games  ·  now {} Hz", hz.unwrap_or(0)),
+            }
+        };
+        p.text(pos2(r.left(), r.center().y - 9.0), Align2::LEFT_CENTER, "Screen refresh", semibold(14.0), TEXT);
+        p.text(pos2(r.left(), r.center().y + 10.0), Align2::LEFT_CENTER, desc, regular(12.0), FAINT);
+        let seg = Rect::from_min_size(pos2(r.right() - 222.0, r.center().y - 17.0), vec2(222.0, 34.0));
+        let sel = Refresh::ALL.iter().position(|&x| x == s.refresh);
+        if let Some(i) = segmented(ui, seg, Id::new("refresh"), &["Off", "Battery", "Adaptive"], sel, can_switch) {
+            self.send(Cmd::Refresh(Refresh::ALL[i]));
+        }
 
         // app
         card_title(p, app, "App");
@@ -2252,9 +2560,12 @@ impl eframe::App for App {
         }
 
         // keep the tray tooltip and check marks current
-        let st = self.shared.lock().unwrap().status.clone();
+        let (st, smart_on) = {
+            let s = self.shared.lock().unwrap();
+            (s.status.clone(), s.settings.smart)
+        };
         if let (Some((tray, menu, _)), Some(st)) = (&self.tray, st) {
-            let fans = st.fan_mode.map_or("Unknown", fan_name);
+            let fans = if smart_on { "Smart" } else { st.fan_mode.map_or("Unknown", fan_name) };
             let boost = if st.cooler_boost { "  ·  Cooler Boost" } else { "" };
             // RPM rounded to 100 so the tooltip doesn't churn on tach jitter
             let rpm = thousands((u32::from(st.fan_rpm) + 50) / 100 * 100);
@@ -2298,6 +2609,10 @@ impl eframe::App for App {
             // whole CPU core. (egui subtracts predicted_dt from the delay.)
             let predicted = root.ctx().input(|i| i.predicted_dt);
             root.ctx().request_repaint_after(Duration::from_secs_f32(1.0 / 60.0 + predicted));
+        }
+        // demo: `--smart` shows Smart mode switched on (for screenshots)
+        if self.frames == 1 && self.mock && std::env::args().any(|a| a == "--smart") {
+            self.send(Cmd::Smart(true));
         }
         if self.frames == 3 {
             win::round_corners();

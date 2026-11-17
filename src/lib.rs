@@ -5,6 +5,8 @@ pub mod automation;
 #[cfg(windows)]
 pub mod autostart;
 pub mod controller;
+#[cfg(windows)]
+pub mod display;
 pub mod ec;
 #[cfg(windows)]
 pub mod elevation;

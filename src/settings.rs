@@ -13,6 +13,32 @@ use crate::ec::map::{ChargeLimit, FanCurve, FanMode, KbdBacklight};
 /// Heat-protection thresholds the UI offers.
 pub const HEAT_LIMITS: [u8; 3] = [85, 90, 95];
 
+/// When the app changes the screen refresh rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Refresh {
+    /// never: leave the screen alone
+    #[default]
+    Off,
+    /// slow rate on battery, fast when plugged in
+    Battery,
+    /// like Battery, but fast on battery too while a heavy program is in front
+    Adaptive,
+}
+
+impl Refresh {
+    pub const ALL: [Refresh; 3] = [Refresh::Off, Refresh::Battery, Refresh::Adaptive];
+    pub fn name(self) -> &'static str {
+        match self {
+            Refresh::Off => "off",
+            Refresh::Battery => "battery",
+            Refresh::Adaptive => "adaptive",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|r| r.name() == s)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     // hardware (None = never changed by the user, leave alone)
@@ -24,6 +50,13 @@ pub struct Settings {
     pub kbd: Option<u8>,
     // software-only
     pub win_lock: bool,
+    /// Smart fan mode: the app sets the speed itself (src/smart.rs). `fan`
+    /// and `curve` stay as the user left them, for when it is switched off.
+    pub smart: bool,
+    /// Smart mode preference in degrees: + quieter, - cooler (-6..=6).
+    pub smart_bias: i8,
+    /// Screen refresh rate switching (src/display.rs).
+    pub refresh: Refresh,
     // automation / app behaviour
     pub heat_protect: bool,
     pub heat_limit: u8,
@@ -41,6 +74,9 @@ impl Default for Settings {
             charge: None,
             kbd: None,
             win_lock: false,
+            smart: false,
+            smart_bias: 0,
+            refresh: Refresh::Off,
             heat_protect: false,
             heat_limit: 90,
             battery_quiet: false,
@@ -75,6 +111,9 @@ impl Settings {
                 }
                 "curve" => s.curve = FanCurve::parse(v),
                 "win_lock" => s.win_lock = on_off(v).unwrap_or(s.win_lock),
+                "smart" => s.smart = on_off(v).unwrap_or(s.smart),
+                "smart_bias" => s.smart_bias = v.parse::<i8>().map_or(s.smart_bias, |b| b.clamp(-6, 6)),
+                "refresh" => s.refresh = Refresh::parse(v).unwrap_or(s.refresh),
                 "boost" => s.boost = on_off(v),
                 "charge" => s.charge = v.parse().ok().filter(|p| ChargeLimit::new(*p).is_some()),
                 "kbd" => s.kbd = v.parse().ok().filter(|l| KbdBacklight::new(*l).is_some()),
@@ -107,7 +146,14 @@ impl Settings {
         if let Some(c) = self.curve {
             out.push_str(&format!("curve={}\n", c.to_text()));
         }
-        out.push_str(&format!("win_lock={}\n", b(self.win_lock)));
+        out.push_str(&format!("win_lock={}
+", b(self.win_lock)));
+        out.push_str(&format!("smart={}
+", b(self.smart)));
+        out.push_str(&format!("smart_bias={}
+", self.smart_bias));
+        out.push_str(&format!("refresh={}
+", self.refresh.name()));
         if let Some(v) = self.boost {
             out.push_str(&format!("boost={}\n", b(v)));
         }
@@ -123,6 +169,11 @@ impl Settings {
         out.push_str(&format!("battery_kbd_off={}\n", b(self.battery_kbd_off)));
         out.push_str(&format!("close_to_tray={}\n", b(self.close_to_tray)));
         out
+    }
+
+    /// Where Smart mode keeps what it has learned (next to the settings).
+    pub fn learned_path() -> Option<PathBuf> {
+        Self::path().map(|p| p.with_file_name("learned.txt"))
     }
 
     pub fn path() -> Option<PathBuf> {
@@ -167,7 +218,7 @@ impl Settings {
 
     /// True if no hardware setting has been chosen yet.
     pub fn no_hardware(&self) -> bool {
-        self.fan.is_none() && self.boost.is_none() && self.charge.is_none() && self.kbd.is_none()
+        !self.smart && self.fan.is_none() && self.boost.is_none() && self.charge.is_none() && self.kbd.is_none()
     }
 
     /// Re-applies every stored hardware setting. Returns (applied, errors).
@@ -178,7 +229,10 @@ impl Settings {
             Ok(()) => ok += 1,
             Err(e) => errs.push(format!("{what}: {e}")),
         };
-        if let Some(f) = self.fan {
+        if self.smart {
+            // Smart mode takes over from here; start from a middling speed
+            run("Smart fan mode", ctl.set_fan_profile(FanMode::Advanced, Some(crate::smart::curve_for(50))));
+        } else if let Some(f) = self.fan {
             run("fan mode", ctl.set_fan_profile(f, self.curve));
         }
         if let Some(b) = self.boost {
@@ -232,6 +286,9 @@ mod tests {
             charge: Some(80),
             kbd: Some(2),
             win_lock: true,
+            smart: true,
+            smart_bias: -3,
+            refresh: Refresh::Adaptive,
             heat_protect: true,
             heat_limit: 85,
             battery_quiet: true,
