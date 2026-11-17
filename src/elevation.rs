@@ -199,7 +199,7 @@ mod tests {
         let pf = program_files().expect("ProgramFilesDir");
         assert!(pf.is_absolute() && pf.join("..").exists());
         assert!(is_protected_install(&pf.join("DragonSlayer").join("dragonslayer.exe")));
-        assert!(!is_protected_install(Path::new(r"D:\MY FILES\PROJECTS\target\release\dragonslayer.exe")));
+        assert!(!is_protected_install(Path::new(r"D:\Projects\DragonSlayer\target\release\dragonslayer.exe")));
         // a look-alike folder next to it is not inside it
         let fake = PathBuf::from(format!("{} Evil", pf.display())).join("dragonslayer.exe");
         assert!(!is_protected_install(&fake));

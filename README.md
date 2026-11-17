@@ -1,213 +1,257 @@
-# DragonSlayer
+<p align="center">
+  <img src="assets/logo.png" width="112" alt="DragonSlayer logo">
+</p>
 
-A small, fast replacement for MSI Dragon Center on the **MSI GF63 Thin 10UC**
-(EC firmware `16R5EMS1.102`). Written in Rust; one 6 MB exe.
+<h1 align="center">DragonSlayer</h1>
 
-![DragonSlayer](docs/demo-dashboard.png)
+<p align="center">
+  <b>A fast, open-source replacement for MSI Dragon Center</b><br>
+  Fan, battery and keyboard control for the <b>MSI GF63 Thin</b> laptop, in one 7 MB app.<br>
+  No background services, no MSI drivers, and a fan mode that learns your laptop.
+</p>
 
-More: [Fan, Smart mode](docs/demo-fans.png) · [Fan, curve editor](docs/demo-fans-custom.png) · [Tools](docs/demo-tools.png) ·
-[System](docs/demo-system.png) · [Automation](docs/demo-automation.png)
-(demo mode screenshots, made with `research/shot-demo.ps1`).
+<p align="center">
+  <img src="docs/demo-dashboard.png" width="860" alt="DragonSlayer dashboard">
+</p>
 
-## What it does
+> **Not affiliated with MSI.** "MSI" and "Dragon Center" are trademarks of
+> Micro-Star International, named here only to say what this app replaces.
+> It writes to your laptop's embedded controller: it has a firmware check and
+> strict limits (see [Safety](#safety)), but use it at your own risk.
 
-- Live CPU / GPU temperature and the fan's real **RPM**, 2-minute
-  temperature chart. The GF63 Thin has **one fan** for CPU and GPU: the
-  Dashboard draws it between the two gauges, turning in step with the
-  tachometer in exact 60× slow motion (the real 40–115 turns a second can't
-  be shown on a screen). Each gauge shows the fan speed its curve asks for.
-- Animated at a paced 60 fps while the Dashboard is visible (about 9% of
-  one core), nothing when hidden in the tray or minimised
-- Maximise button (or double-click the title bar): the whole layout scales
-  up to fill the screen
-- Fan: **Smart / Silent / Custom**, **Cooler Boost** on/off. Smart is the
-  default. MSI's own curve ("Auto" in Dragon Center) is not a menu choice:
-  next to Smart it only confused. It is the Factory preset inside Custom,
-  and the app hands the fan back to it when it quits.
-- **Custom fan curve** (Fan tab): drag 7 bars (hover shows the RPM), or pick
-  Quiet / Factory / Cool / Max. Safety: 20–100%, never decreasing, and the
-  two hottest steps never below factory (70%, 85%). Auto and Silent put the
-  factory curve back. The presets are tuned from a measurement of this
-  laptop (see "Fan measurement" in docs/how-dragon-center-works.md).
-- **Smart fan mode** (Fan tab, or Cooling → Smart): the app sets the fan
-  itself and keeps learning (switching it on turns Cooler Boost off).
-  It learns a map of this laptop (the
-  temperature each fan speed gives at each load level) and never stops
-  updating it, so it follows dust, room temperature and ageing. It acts on
-  load before the heat arrives, ignores short spikes, keeps going after
-  load until the stored heat is gone, and remembers which programs are
-  heavy (judged by the CPU the program itself uses, not by whatever else
-  is running) so it can spin up the moment one comes to the front. The panel
-  shows what it is doing and why, and the learned map. A Quieter / Balanced
-  / Cooler choice shifts its target. Learned data: `%APPDATA%\DragonSlayer\
-  learned.txt` (program names stay on this PC; "Forget" wipes it).
-- **History log**: every 5 seconds one line (temperatures, CPU and GPU
-  load, fan target, RPM, mode, battery, Smart's decision) goes to
-  `%APPDATA%\DragonSlayer\history\<day>.csv`: about 1 MB a day, newest 14
-  days kept, no program names, nothing leaves the PC. It is there to
-  compare fan modes and tune Smart mode from real use.
-- **Screen refresh** (Automation tab): Off / Battery (slow rate on battery,
-  fast plugged in) / Adaptive (also fast on battery while the graphics chip
-  is busy, i.e. a game). This panel offers 48 and 144 Hz only and has no
-  variable refresh, so switches are rare: the wanted rate must hold 5 s and
-  switches are 20 s apart.
-- **Webcam** power on/off (hardware), with a check whether Windows sees a camera
-- **Windows-key lock** for gaming (software hook, while the app runs)
-- **Power plan** switcher (Windows plans: Balanced, Ultimate Performance, ...)
-- **Scenarios** — Silent / Balanced / Performance / Extreme (Balanced and
-  Performance leave the fan to Smart mode): one click sets
-  power plan + fans, like Dragon Center's User Scenario page
-- **Battery charge limit**: 60% / 80% / 100%
-- **Keyboard light**: Off / Low / Mid / High
-- Remembers your choices and **re-applies them every time it starts**
-- **Start with Windows** switch (Task Scheduler, no admin prompt at login,
-  starts hidden in the tray)
-- **Tray icon**: temps on hover, quick menu (Cooler Boost, Silent fans,
-  Open, Quit); the X button hides to the tray
+---
 
-Things Dragon Center can't do:
+## Why I made this
 
-- **Heat protection** — Cooler Boost turns on automatically at 85/90/95 °C
-  and off again once things have cooled down
-- **When unplugged** — fans Silent and/or keyboard light off on battery,
-  your own settings back when you plug in
-- **System tab** — CPU usage, RAM, NVIDIA GPU load/clock/watts, and
-  **battery health** (capacity vs. new, charge rate, voltage) with advice
+I own an MSI GF63 Thin, and Dragon Center, the app MSI ships to control it,
+was honestly the worst part of the laptop.
 
-## How to run
+- **The software felt heavy.** Just to set the fan and the keyboard light
+  it needed three separate installs and kept four services running all the
+  time.
+- **I didn't like the UI.** It just didn't look good to me.
+- **It wasn't safe.** It loads two MSI kernel drivers. One of them opens
+  without admin rights and lets any program on the PC read physical memory.
+  The other belongs to a driver family with a published security flaw.
+- **MSI's fan tuning is bad for this laptop.** When I measured it, the idle
+  temperature sat right on one of the curve's steps, so the fan kept flipping
+  between about 2,500 and 2,900 RPM for no reason. And because it only
+  reacts to temperature, the fan always starts late: load heats the CPU by
+  20 °C in seconds, while the fan needs about 25 seconds to spin up.
 
-Installed in `C:\Program Files\DragonSlayer` (desktop shortcut and taskbar
-pin point there). Install or update after a rebuild:
+So I replaced it. DragonSlayer does the same jobs from one small app in the
+tray, talks to the hardware through a signed, open-source driver, and looks
+the way I wanted a control app to look. Its Smart fan mode learns how my
+laptop actually behaves: at idle it holds about 1,800 RPM steadily instead
+of hunting. On top of that it adds things Dragon Center never had: real fan
+RPM, automatic heat protection, a battery-health report and a history log.
 
-```
+## DragonSlayer vs Dragon Center
+
+| | Dragon Center | **DragonSlayer** |
+|---|---|---|
+| What gets installed | Store app + MSI SDK + MSI NBFoundation Service | **one ~7 MB exe** |
+| Always-running background services | 4 (Central, Companion, Foundation, Sendevsvc) | **none**: one app, idle in the tray |
+| Kernel drivers | MSI's WinIO (`KernCoreLib64.sys`): opens **without admin** and gives raw physical-memory access. MSI's MSIO (`MsIo64.sys`): a driver family with a published memory-access flaw (CVE-2019-18845) | **[PawnIO](https://github.com/namazso/PawnIO)**: signed, open source, admin-only, and only an embedded-controller module is loaded |
+| Fan control | fixed curves (Auto / Silent / Basic) + a manual curve | **Smart mode that learns** + Silent + a curve editor with presets measured on the real laptop |
+| What the fan reacts to | temperature only, so it is late; reacts to every spike | **load and temperature**: up before the heat arrives, ignores short spikes, knows which programs are heavy |
+| Fan speed shown as | percent | **real RPM** from the tachometer, plus a live animated fan |
+| Idle fan on a GF63 Thin 10UC | flips between ~2,500 and ~2,900 RPM | Smart holds **~1,800 RPM** steady (measured) |
+| Overheating | Cooler Boost by hand | **automatic heat protection** (Cooler Boost on at 85 / 90 / 95 °C, off when cool) |
+| Battery | charge limit | charge limit + **battery health** (capacity vs new, wear, charge rate) |
+| On battery | — | optional quiet fan, keyboard light off, **48 Hz screen** |
+| History | — | **14-day log** of temperatures, load and fan, to compare modes |
+| Admin prompt when opening | none | none (see [How it opens without a prompt](#how-it-opens-without-a-prompt)) |
+| Source code | closed | **open (MIT)** |
+
+## Screenshots
+
+| | |
+|---|---|
+| **Smart fan mode**: what it is doing and why, and the map it has learned<br><img src="docs/demo-fans.png" alt="Smart fan mode"> | **Curve editor**: drag 7 bars or pick a preset; hover shows the RPM<br><img src="docs/demo-fans-custom.png" alt="Fan curve editor"> |
+| **Tools**: webcam power, Windows-key lock, power plans, scenarios<br><img src="docs/demo-tools.png" alt="Tools tab"> | **System**: CPU, RAM, GPU and battery health<br><img src="docs/demo-system.png" alt="System tab"> |
+| **Automation**: heat protection, battery behaviour, screen refresh<br><img src="docs/demo-automation.png" alt="Automation tab"> | |
+
+Screenshots come from demo mode (`--mock`), so the numbers are made up.
+On the Dashboard the fan really spins: it is locked to the tachometer in
+exact 60× slow motion, because the real fan's 40–115 turns a second can't
+be shown on a screen.
+
+## Features
+
+**Fan**
+- **Smart mode** (the default). It learns a map of your laptop, the
+  temperature each fan speed gives at each load level, and keeps updating
+  it, so it follows dust, room temperature and wear. It raises the fan when
+  load starts, before the heat arrives, ignores spikes of a few seconds,
+  keeps going after load ends until the stored heat is gone, and remembers
+  which programs are heavy (by the CPU they use themselves) so it can spin
+  up the moment one comes to the front. A *Quieter / Balanced / Cooler*
+  choice shifts its aim. Everything it learns stays in
+  `%APPDATA%\DragonSlayer`; *Forget* wipes it.
+- **Silent** and **Custom**: a 7-point curve editor with Quiet / Factory /
+  Cool / Max presets built from a measurement of the real laptop (RPM ≈
+  59.5 × percent; [notes](docs/how-dragon-center-works.md#fan-measurement-and-preset-tuning-2026-11-17)).
+- **Cooler Boost** on demand, and **heat protection** that switches it on
+  automatically.
+- Live **RPM** from the fan's tachometer. The GF63 Thin has one fan for CPU
+  and GPU, and the app treats it that way.
+
+**Battery and power**
+- Charge limit 60 / 80 / 100 %, battery health with plain advice.
+- Windows power plan switcher and one-click **scenarios** (Silent /
+  Balanced / Performance / Extreme).
+- **On battery**: optional quiet fan and keyboard light off; your settings
+  come back when you plug in.
+- **Screen refresh switching**: slow rate on battery, fast when plugged in
+  or (Adaptive) while a game is running. Switches are rare, because each one
+  blanks the screen for a moment.
+
+**Everything else**
+- Keyboard backlight (Off / Low / Mid / High), webcam power cut in hardware,
+  Windows-key lock for games.
+- **History log**: every 5 s, temperatures, load, fan and mode go to
+  `%APPDATA%\DragonSlayer\history\<day>.csv` (14 days kept, no program
+  names, nothing leaves the PC).
+- Tray icon with temperatures and a quick menu; starts with Windows hidden
+  in the tray; re-applies your settings on every start.
+- One copy at a time: clicking the icon again brings the window forward.
+- Smooth, animated UI: 60 fps while the Dashboard is visible (about 9 % of
+  one CPU core), nothing while it is in the tray or minimised. Maximise
+  scales the whole layout.
+- Command-line tool `dragonslayer-cli` for scripting.
+
+## Supported laptops
+
+DragonSlayer only writes to laptops whose embedded-controller firmware it
+has verified. On anything else it opens **read-only**, and its readings
+may be wrong.
+
+| Status | Models | Controller firmware |
+|---|---|---|
+| ✅ **Tested** | MSI GF63 Thin **10UC** | `16R5EMS1.102` |
+| 🟡 **Should work, untested** (same firmware family, so the app allows it) | MSI GF63 Thin **10UD**, GF63 Thin **10SC** | `16R5EMS1.1xx` |
+| ⚪ **Same register layout, not enabled yet** | GF63 8RC, GF63 Thin 9SC / 9SCSR / 10SCX(R) / 10SCS(R), GF65 Thin 9SE / 9SD / 10SCSXR / 10SD / 10SE / 10UE | `16R1`, `16R3`, `16R4`, `16W1`, `16W2` `EMS*.1xx` |
+
+The model list comes from the [msi-ec](https://github.com/BeardOverflow/msi-ec)
+project (configuration `CONF_G1_7`). Models in the last row would need their
+firmware prefix added to `SUPPORTED_FW_PREFIXES` in `src/ec/map.rs` and a
+careful test, since the GF65 has two fans. If you own one, an issue with
+the output of `dragonslayer-cli status` is very welcome.
+
+## Install
+
+You need:
+1. **[PawnIO](https://github.com/namazso/PawnIO)** installed (the signed
+   driver DragonSlayer talks to the hardware through).
+2. To build: Rust (stable, MSVC toolchain) and the Windows SDK (for `rc.exe`).
+
+```powershell
+git clone https://github.com/roskuttan/DragonSlayer
+cd DragonSlayer
 cargo build --release
 powershell -ExecutionPolicy Bypass -File research\install.ps1
 ```
 
-(one admin prompt for the copy; the script then tests a plain click).
+`install.ps1` asks for admin once, copies the app to
+`C:\Program Files\DragonSlayer`, starts it, and checks that a plain click
+opens it without a prompt. It never creates a desktop shortcut; pin the app
+from the Start menu or the tray if you want one. Try it without hardware
+first: `target\release\dragonslayer.exe --mock`.
 
-**No admin prompt when you open it.** PawnIO only lets administrators talk
-to the hardware, so the app needs admin rights, but the exe doesn't ask for
-them (asInvoker). A click starts a normal copy that
-1. brings the already-running app forward if there is one (one copy at a
-   time), else
-2. runs the Task Scheduler task "DragonSlayer Open" (run with highest
-   privileges: admin, no prompt) and exits, else
-3. asks once (UAC) — only before the task exists.
+### Switching from Dragon Center
 
-That task is only created for a copy under Program Files: only admins can
-write there, so no other program can swap the exe and ride the no-prompt
-launch. For the same reason the admin app finds PawnIO, `schtasks`,
-`tasklist` and `nvidia-smi` by fixed paths (Program Files from HKLM,
-System32 from the OS), never through PATH or environment variables.
-Starting a dev build from `target\release` removes the task again (and
-points Start with Windows at the dev build): reinstall to get both back.
-With *Start with Windows* on, it starts at login the same way.
+1. Open DragonSlayer. The bottom strip must say **PawnIO · read & write**.
+2. Pick your settings and turn **Start with Windows** on.
+3. Uninstall **Dragon Center**, **MSI NBFoundation Service** (listed twice)
+   and **MSI SDK** in Windows Settings → Apps. MSI Afterburner and Nahimic
+   are separate apps; keep them if you use them.
+4. Restart. DragonSlayer starts in the tray and restores your settings.
 
-Command line (no GUI): `"C:\Program Files\DragonSlayer\dragonslayer-cli.exe" status | dump | watch |
-fan auto|silent | curve quiet|cool|max|38,43,48,54,60,70,85 | webcam on|off |
-boost on|off | charge 60 | kbd 0-3 | power [plan name]` (add
-`--backend pawnio` and run from an admin terminal to use PawnIO).
-
-Tests: `cargo test` (63 tests; Smart mode runs against a simulated laptop).
-Windows-key lock check without touching the keyboard:
-`cargo run --release --example winkey_check`.
+MSI's uninstallers can leave the `MSIO` driver behind; check
+`sc query MSIO` and remove it if you don't need it.
 
 ## How it works
 
 ```
-DragonSlayer  ──PawnIO (signed driver)──►  EC ports 0x62/0x66  ──►  Embedded Controller
+DragonSlayer ── PawnIO (signed driver, LpcACPIEC module) ── ports 0x62/0x66 ── embedded controller
 ```
 
-- **Hardware access: PawnIO 2.2.0** (installed in `C:\Program Files\PawnIO`)
-  with the signed `LpcACPIEC` module (`vendor/pawnio/LpcACPIEC.bin`,
-  LGPL-2.1, see `vendor/pawnio/COPYING`). The app implements the ACPI EC
-  read/write protocol and holds the shared `Global\Access_EC` lock.
-- **Fallback:** while Dragon Center is installed, the app can also use MSI's
-  own WinIO driver. That fallback disappears when Dragon Center is
-  uninstalled — which is good: MSI's driver lets any program read/write all
-  memory without admin.
-- **Safety:** writes only happen if the EC firmware is the verified model,
-  only to allow-listed registers (5 settings + the 14 fan-speed bytes; never
-  the fan curve's temperature steps), only with known-valid values, and every
-  write is read back.
-- Full reverse-engineering notes: [docs/how-dragon-center-works.md](docs/how-dragon-center-works.md).
+The laptop's fan, keyboard light and charging are run by a small chip on
+the motherboard, the **embedded controller (EC)**, with its own firmware.
+Its settings are single bytes. DragonSlayer reads and writes those bytes
+through PawnIO using the standard ACPI EC protocol, and shares the
+`Global\Access_EC` lock with other tools. The register map was worked out
+from Dragon Center's own files and by watching what it changes:
+[docs/how-dragon-center-works.md](docs/how-dragon-center-works.md).
 
-### Tested on this laptop (2026-11-16)
+### Safety
 
-| Feature | Register | Status |
-|---|---|---|
-| Temps, fan % | `0x68 0x71 0x80 0x89` | reads match MSI driver |
-| Fan RPM | `0xCC–0xCD` (480000 / value) | ~2,900 RPM in Auto, **~6,850 with Cooler Boost**; `0xC8` ignores Boost, `0xCA` is always 0 |
-| Keyboard light | `0xF3` | **changed via PawnIO, cross-checked** |
-| Fan Auto / Silent | `0xF4` | **changed via PawnIO** (Silent → Auto) |
-| Cooler Boost | `0x98` bit 7 | **changed via PawnIO**, fan went to ~6,850 RPM |
-| Custom fan curve | `0x72–0x78`, `0x8A–0x90` | **changed from the app**: targets went 70→82% / 54→63% within 3 s, exactly as the curve says; Auto restored factory. RPM ≈ 59.5 × percent (measured 35–100%) |
-| Webcam | `0x2E` bit 1 | bit changes and reads back, **but Windows saw no camera** either way (camera may be disconnected on this unit) |
-| Power plans | Windows API | switched Ultimate → Balanced → Ultimate |
-| Windows-key lock | software | **works**: injected Windows key swallowed, other keys pass (`examples/winkey_check.rs`) |
-| Battery limit | `0xEF` | **changed via PawnIO** (100 → 80 → 100) |
-| Shift mode | `0xF2` | **blocked** — Dragon Center never uses it here |
-| Settings restore | — | **works**: re-applied the saved keyboard level on start |
-| Dragon Center removed | — | everything above re-checked through PawnIO afterwards |
-| Start with Windows | — | **works**: started hidden in the tray after the 2026-11-17 restart |
-| Smart fan mode | `0x72–0x78`, `0x8A–0x90` | **runs on this PC** since 2026-11-17: 30 % in light use = about 1,790 RPM (Auto: 2,500–2,900), 90–100 % during a build. Being tuned from the history log; not yet tried in a long game |
-| Screen refresh switching | Windows API | reads this screen (48 / 144 Hz); **switching not yet tried on this PC** |
-| Tray, scenarios | — | built, not yet tried on this PC |
+- **Firmware gate**: no writes unless the EC firmware is a verified one.
+- **Allowlist**: only 5 settings and the 14 fan-speed bytes can be written,
+  never the curve's temperature steps, and only with known-valid values.
+  Every write is read back.
+- **Fan floor**: no curve, including Smart mode's, can go below MSI's own
+  speeds at the two hottest steps (70 % at 82 °C, 85 % at 88 °C), so a
+  frozen app can never leave the fan slow on a hot laptop.
+- **Smart mode limits**: at least 90 % fan from 88 °C, 100 % if the CPU
+  stays at 92 °C. When the app quits, it hands the fan back to MSI's curve.
 
-## Uninstalling Dragon Center
+### How it opens without a prompt
 
-Done on this laptop 2026-11-16 (restore point "Before removing Dragon
-Center" made first). The MSI SDK uninstaller also removed NBFoundation and
-MSI's WinIO driver. Leftovers removed on 2026-11-17: MSI's `MSIO` driver
-(`MsIo64.sys`, loaded at every boot, known vulnerable), `C:\ProgramData\MSI`
-and the MSI registry keys except Afterburner's.
+PawnIO only lets administrators in, so the app needs admin rights, but the
+exe never asks for them. A click starts a normal copy that either wakes the
+copy already running, or runs a Task Scheduler task with highest
+privileges and exits. That task only exists for a copy under
+`C:\Program Files`, which ordinary programs can't overwrite, so it can't be
+used to sneak around UAC. For the same reason the app finds PawnIO and every
+helper program by fixed system paths, never through `PATH` or environment
+variables.
 
-1. Open DragonSlayer. The bottom strip must say **PawnIO · read & write**.
-2. Pick your fan / battery / keyboard settings (they're saved as you click),
-   and turn **Start with Windows** on.
-3. Windows Settings → Apps → Installed apps, uninstall:
-   - **Dragon Center**
-   - **MSI NBFoundation Service** (listed twice — remove both)
-   - **MSI SDK**
-   - Keep **MSI Afterburner** (separate, still useful). Nahimic (audio) is
-     separate too — remove only if you don't use it.
-4. Restart. DragonSlayer should start minimized and show
-   "Restored your N saved settings", with no Dragon Center warning.
+## Tested on a real GF63 Thin 10UC
 
-Note: the logon task points at the exe it was started from; each start
-re-points it (and moves it over from the old "MSI Control" name), so moving
-the exe is fine as long as you open it once from the new place.
+| What | Result |
+|---|---|
+| Temperatures, fan %, fan RPM | match MSI's own driver; RPM 1,790 at 30 % … 6,860 with Cooler Boost |
+| Fan modes, custom curve, Cooler Boost, battery limit, keyboard light | changed and read back through PawnIO |
+| Smart mode | running daily since 2026-11-17; tuned from its history log |
+| Start with Windows, no-prompt launch, one copy at a time | verified |
+| Windows-key lock | verified with an automatic test (`examples/winkey_check.rs`) |
+| Webcam switch | the bit changes, but this unit's camera doesn't appear in Windows either way |
+| Screen refresh switching | reads the screen's rates (48 / 144 Hz); switching itself not yet confirmed |
 
-## Layout
+`cargo test` runs 63 tests, including Smart mode against a simulated laptop
+built from the real measurements.
+
+## Project layout
 
 ```
-src/ec/map.rs        register map + encode/decode (unit-tested)
-src/ec/pawnio.rs     PawnIO backend (ACPI EC protocol)
-src/ec/winio.rs      MSI WinIO backend (fallback while Dragon Center exists)
-src/controller.rs    safety layer: firmware gate, allowlist, read-back
-src/settings.rs      saved settings, re-applied on start
-src/automation.rs    heat protection, on-battery profile (unit-tested)
-src/smart.rs         Smart fan mode: the learning brain (pure logic, simulated-laptop tests)
-src/display.rs       screen refresh rates and when to switch
-src/history.rs       history log (one CSV a day)
-src/power.rs         Windows power plans
-src/winkey.rs        Windows-key lock (keyboard hook)
-src/sysinfo.rs       CPU / RAM / GPU / battery health / camera check
-src/autostart.rs     Task Scheduler: Start with Windows + no-prompt "Open" task
-src/elevation.rs     admin rights without a prompt, one copy at a time
-src/bin/dragonslayer.rs   the app
-src/main.rs          command line tool
-src/icon.rs          app icon at any size, from assets/icon-256.rgba
-assets/              logo: logo-source.webp (original), logo.png (cut-out
-                     master), icon-256.rgba (embedded); remake both with
-                     research/make-icon.ps1 -Source <new image>.
-                     dragonslayer.ico = copy of the built exe icon; the desktop
-                     shortcut and taskbar pin use it (a fresh path dodges
-                     Windows' icon cache)
-examples/winkey_check.rs   automatic Windows-key lock test
-examples/icon_preview.rs   icon at 16-64 px, to check it stays readable
-research/            probe/watch/test scripts; install.ps1 (install + click
-                     test), measure-fan.ps1 + fan-measure-2026-11-17.csv
-docs/                findings, plans, screenshot
+src/bin/dragonslayer.rs   the app (window, tray, worker)
+src/main.rs               dragonslayer-cli
+src/smart.rs              Smart fan mode: the learning part (pure logic, simulated-laptop tests)
+src/controller.rs         safety layer: firmware gate, allowlist, read-back
+src/ec/                   register map, PawnIO backend (ACPI EC protocol)
+src/settings.rs           saved settings
+src/automation.rs         heat protection, on-battery profile
+src/history.rs            history log
+src/display.rs            screen refresh rates
+src/power.rs, sysinfo.rs  power plans, CPU / GPU / battery readings
+src/autostart.rs, elevation.rs   Task Scheduler tasks, admin rights without a prompt
+docs/                     reverse-engineering notes, screenshots
+research/                 install, measurement, stress-test and screenshot scripts, raw data
+vendor/pawnio/            PawnIO's signed LpcACPIEC module (LGPL-2.1)
 ```
+
+## Credits
+
+- [PawnIO](https://github.com/namazso/PawnIO) by namazso: the signed
+  driver and the `LpcACPIEC` module (LGPL-2.1, included in `vendor/pawnio`).
+- [msi-ec](https://github.com/BeardOverflow/msi-ec): the Linux driver whose
+  register map for this family was the starting point.
+- Built with [egui](https://github.com/emilk/egui) and
+  [tray-icon](https://github.com/tauri-apps/tray-icon).
+
+## License
+
+MIT; see [LICENSE](LICENSE). The bundled PawnIO module keeps its own
+LGPL-2.1 license.

@@ -207,7 +207,7 @@ only `Get_*` methods (no `Set_*`, no WinIO) and saves a report
 `research/probe-output_<time>.txt`. In an **Administrator** PowerShell:
 
 ```powershell
-cd "D:\MY FILES\PROJECTS\System-Utilities\MSI-Control\research"
+cd <path to the repo>\research
 powershell -ExecutionPolicy Bypass -File .\probe-readonly.ps1            # documented reads
 powershell -ExecutionPolicy Bypass -File .\probe-readonly.ps1 -Explore   # + raw dumps of other Get_* methods
 ```

@@ -2,10 +2,14 @@
 name = "dragonslayer"
 version = "0.1.0"
 edition = "2024"
+description = "Fan, battery and keyboard control for the MSI GF63 Thin 10UC: an open-source replacement for MSI Dragon Center"
+license = "MIT"
+repository = "https://github.com/roskuttan/DragonSlayer"
+readme = "README.md"
 # both exes are declared below (the CLI would otherwise take the package name)
 autobins = false
 
-# The app. Its exe requires admin (manifest), so cargo can't launch a test build of it.
+# The app (window + tray). Its logic is tested in the library.
 [[bin]]
 name = "dragonslayer"
 path = "src/bin/dragonslayer.rs"
