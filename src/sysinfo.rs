@@ -389,15 +389,18 @@ unsafe extern "system" {
     fn QueryFullProcessImageNameW(process: *mut c_void, flags: u32, name: *mut u16, size: *mut u32) -> i32;
     #[link_name = "CloseHandle"]
     fn CloseProcessHandle(h: *mut c_void) -> i32;
+    fn GetProcessTimes(process: *mut c_void, created: *mut FileTime, exited: *mut FileTime, kernel: *mut FileTime, user: *mut FileTime) -> i32;
 }
 
-/// File name of the program whose window is in front, lower case
-/// ("game.exe"). None for the desktop or if it can't be read.
-pub fn foreground_app() -> Option<String> {
+/// The program whose window is in front: (process id, file name in lower
+/// case such as "game.exe", CPU time it has used so far in 100 ns units).
+/// None for the desktop or if it can't be read.
+fn foreground() -> Option<(u32, String, u64)> {
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     let mut pid = 0u32;
     let mut buf = [0u16; 520];
     let mut len = buf.len() as u32;
+    let (mut c, mut e, mut k, mut u) = (FileTime::default(), FileTime::default(), FileTime::default(), FileTime::default());
     // SAFETY: plain queries; the buffer is passed with its length; the
     // process handle is closed again.
     let ok = unsafe {
@@ -409,7 +412,7 @@ pub fn foreground_app() -> Option<String> {
         if h.is_null() {
             return None;
         }
-        let ok = QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len) != 0;
+        let ok = QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len) != 0 && GetProcessTimes(h, &mut c, &mut e, &mut k, &mut u) != 0;
         CloseProcessHandle(h);
         ok
     };
@@ -418,5 +421,35 @@ pub fn foreground_app() -> Option<String> {
     }
     let path = String::from_utf16_lossy(&buf[..len as usize]);
     let name = path.rsplit(['\\', '/']).next()?.to_lowercase();
-    (!name.is_empty()).then_some(name)
+    (!name.is_empty()).then_some((pid, name, k.v() + u.v()))
+}
+
+/// Follows the program in front and how much CPU it uses itself, so load
+/// from something running behind it isn't blamed on it.
+#[derive(Default)]
+pub struct FrontApp {
+    last: Option<(u32, u64, std::time::Instant)>,
+}
+
+impl FrontApp {
+    /// (file name, its own CPU use since the previous call as a percent of
+    /// the whole machine). None for the desktop, for this app's own window,
+    /// or if it can't be read. A program's first reading reports 0 %.
+    pub fn sample(&mut self) -> Option<(String, f32)> {
+        let Some((pid, name, cpu)) = foreground() else {
+            self.last = None;
+            return None;
+        };
+        let now = std::time::Instant::now();
+        let pct = match self.last {
+            Some((p, before, at)) if p == pid && cpu >= before => {
+                let wall = now.duration_since(at).as_secs_f64() * 1e7; // 100 ns units
+                let cores = std::thread::available_parallelism().map_or(1.0, |n| n.get() as f64);
+                if wall > 0.0 { ((cpu - before) as f64 / (wall * cores) * 100.0).clamp(0.0, 100.0) as f32 } else { 0.0 }
+            }
+            _ => 0.0,
+        };
+        self.last = Some((pid, cpu, now));
+        (pid != std::process::id()).then_some((name, pct))
+    }
 }

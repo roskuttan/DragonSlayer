@@ -75,8 +75,10 @@ pub struct Sample {
     pub cpu_load: f32,
     pub gpu_load: f32,
     pub on_battery: bool,
-    /// the program in front (exe name), if known
+    /// the program in front (exe name), if known. Never this app itself.
     pub app: Option<String>,
+    /// how much of the whole CPU that program itself is using, percent
+    pub app_cpu: f32,
 }
 
 /// One cell of the map: the temperature this (load, fan speed) settles at.
@@ -237,8 +239,15 @@ impl Brain {
         if let Some(app) = &s.app {
             let st = self.apps.entry(app.clone()).or_default();
             st.secs += dt;
-            let rate = if load_now > st.typical { 0.05 } else { 0.004 };
-            st.typical += (load_now - st.typical) * (rate * dt).min(1.0);
+            // Only load the program itself causes counts. If it is behind
+            // at least half of the CPU load, the whole load (GPU too) is its
+            // doing; otherwise just its own share. First version blamed the
+            // program in front for everything: this app's own window, open
+            // during a build, was "learned" as heavy and revved the fan to
+            // 90 % each time it was opened (2026-11-17).
+            let caused = if s.app_cpu >= 0.5 * s.cpu_load { load_now } else { s.app_cpu.clamp(0.0, 100.0) };
+            let rate = if caused > st.typical { 0.05 } else { 0.004 };
+            st.typical += (caused - st.typical) * (rate * dt).min(1.0);
             if self.last_app.as_ref() != Some(app) {
                 let usual = level_of(st.typical);
                 if st.secs >= APP_KNOWN_SECS && usual >= 2 && usual > self.level {
@@ -413,7 +422,7 @@ impl Brain {
     // ---- saved between runs: plain text, one fact per line -----------------
 
     pub fn to_text(&self) -> String {
-        let mut out = format!("v1\nlearned_secs {:.0}\n", self.learned_secs);
+        let mut out = format!("v2\nlearned_secs {:.0}\n", self.learned_secs);
         for (l, row) in self.map.iter().enumerate() {
             for (f, c) in row.iter().enumerate() {
                 if c.n > 0 {
@@ -432,6 +441,9 @@ impl Brain {
     /// Reads what `to_text` wrote; lines it doesn't understand are skipped.
     pub fn parse(text: &str) -> Self {
         let mut b = Self::default();
+        // v1 files blamed the program in front for all load: their program
+        // list is wrong, so it is dropped (the map is kept)
+        let old_apps = text.lines().next() == Some("v1");
         for line in text.lines() {
             let mut it = line.splitn(2, ' ');
             let (kind, rest) = (it.next().unwrap_or(""), it.next().unwrap_or(""));
@@ -445,7 +457,7 @@ impl Brain {
                         b.map[l][f] = Cell { temp: nums[2], n: nums[3] as u32, first: nums[4] };
                     }
                 }
-                "app" => {
+                "app" if !old_apps => {
                     let mut p = rest.splitn(3, ' ');
                     if let (Some(Ok(secs)), Some(Ok(typical)), Some(name)) = (p.next().map(str::parse), p.next().map(str::parse), p.next())
                         && !name.is_empty()
@@ -497,17 +509,21 @@ mod tests {
         last: Option<Decision>,
         /// the Quieter (+) / Cooler (-) preference
         bias: f32,
+        /// the load comes from something other than the program in front
+        background: bool,
     }
 
     impl Run {
         fn new(brain: Brain) -> Self {
-            Self { brain, pc: Laptop::new(), fan: 30, changes: 0, peak: 0.0, last: None, bias: 0.0 }
+            Self { brain, pc: Laptop::new(), fan: 30, changes: 0, peak: 0.0, last: None, bias: 0.0, background: false }
         }
         /// `secs` seconds at a CPU load (percent), with an optional program in front.
         fn go(&mut self, secs: u32, cpu_load: f32, app: Option<&str>) {
             for _ in 0..secs {
                 self.pc.step(cpu_load, self.fan);
-                let s = Sample { cpu_temp: self.pc.chip, gpu_temp: self.pc.sink + 12.0, cpu_load, app: app.map(String::from), ..Default::default() };
+                // the program in front causes the load, unless `background` says something else does
+                let app_cpu = if self.background { 1.0 } else { cpu_load };
+                let s = Sample { cpu_temp: self.pc.chip, gpu_temp: self.pc.sink + 12.0, cpu_load, app: app.map(String::from), app_cpu, ..Default::default() };
                 let d = self.brain.tick(&s, 1.0, self.bias);
                 if d.fan_pct != self.fan {
                     self.changes += 1;
@@ -648,6 +664,27 @@ mod tests {
         r.go(300, 4.0, Some("notes.exe"));
         assert_eq!(r.fan, 30);
         assert_eq!(r.brain.known_apps()[0].0, "game.exe");
+    }
+
+    #[test]
+    fn load_from_elsewhere_does_not_make_the_front_program_heavy() {
+        // seen on the real laptop: this app's own window was in front
+        // during builds and got "learned" as a heavy program
+        let mut r = Run::new(Brain::default());
+        r.background = true;
+        r.go(900, 65.0, Some("reader.exe")); // a build runs behind a reader
+        r.background = false;
+        r.go(600, 4.0, Some("notes.exe"));
+        assert_eq!(r.fan, 30);
+        r.go(3, 4.0, Some("reader.exe"));
+        assert_eq!(r.fan, 30, "bringing it to the front does not spin the fan up");
+        assert!(r.brain.known_apps().iter().all(|a| a.1 < 2), "{:?}", r.brain.known_apps());
+        // and an old (v1) file's program list is not trusted
+        let old = Brain::parse("v1
+cell 0 0 68.0 9 0
+app 900 60 dragonslayer.exe
+");
+        assert!(old.apps.is_empty() && old.known_cells() == 1);
     }
 
     #[test]

@@ -220,7 +220,7 @@ impl BrainView {
 
 /// Demo mode: a few hours of made-up learning, so the Smart panel has
 /// something to show.
-const DEMO_LEARNED: &str = "v1
+const DEMO_LEARNED: &str = "v2
 learned_secs 15120
 cell 0 0 67.8 400 67.2
 cell 0 1 66.9 40 66.5
@@ -320,6 +320,7 @@ fn spawn_worker<B: EcBackend + 'static>(
         // history log (real runs only; the demo writes nothing)
         let mut log = if persist { Settings::path().map(|p| history::Log::new(p.with_file_name("history"))) } else { None };
         let mut switcher = display::Switcher::default();
+        let mut front_app = sysinfo::FrontApp::default();
         let screen_rates = if persist { display::rates() } else { vec![48, 144] };
         let mut tick: u32 = 0;
         loop {
@@ -420,6 +421,14 @@ fn spawn_worker<B: EcBackend + 'static>(
                 gpu_load = g.util_pct;
             }
             let mut decision = None;
+            // the program in front and its own CPU use (never this app itself)
+            let front = if !settings.smart {
+                None
+            } else if persist {
+                front_app.sample()
+            } else {
+                Some(("chrome.exe".to_string(), cpu_load))
+            };
             if settings.smart && let Ok(st) = &status {
                 let sample = smart::Sample {
                     cpu_temp: f32::from(st.cpu_temp_c),
@@ -427,7 +436,8 @@ fn spawn_worker<B: EcBackend + 'static>(
                     cpu_load,
                     gpu_load,
                     on_battery: power.is_some_and(|p| !p.0),
-                    app: if persist { sysinfo::foreground_app() } else { Some("chrome.exe".into()) },
+                    app: front.clone().map(|f| f.0),
+                    app_cpu: front.as_ref().map_or(0.0, |f| f.1),
                 };
                 let d = brain.tick(&sample, dt, f32::from(settings.smart_bias));
                 let want = smart::curve_for(d.fan_pct);

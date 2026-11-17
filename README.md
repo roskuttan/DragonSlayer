@@ -36,7 +36,8 @@ More: [Fan, Smart mode](docs/demo-fans.png) · [Fan, curve editor](docs/demo-fan
   updating it, so it follows dust, room temperature and ageing. It acts on
   load before the heat arrives, ignores short spikes, keeps going after
   load until the stored heat is gone, and remembers which programs are
-  heavy so it can spin up the moment one comes to the front. The panel
+  heavy (judged by the CPU the program itself uses, not by whatever else
+  is running) so it can spin up the moment one comes to the front. The panel
   shows what it is doing and why, and the learned map. A Quieter / Balanced
   / Cooler choice shifts its target. Learned data: `%APPDATA%\DragonSlayer\
   learned.txt` (program names stay on this PC; "Forget" wipes it).
@@ -108,7 +109,7 @@ fan auto|silent | curve quiet|cool|max|38,43,48,54,60,70,85 | webcam on|off |
 boost on|off | charge 60 | kbd 0-3 | power [plan name]` (add
 `--backend pawnio` and run from an admin terminal to use PawnIO).
 
-Tests: `cargo test` (62 tests; Smart mode runs against a simulated laptop).
+Tests: `cargo test` (63 tests; Smart mode runs against a simulated laptop).
 Windows-key lock check without touching the keyboard:
 `cargo run --release --example winkey_check`.
 
