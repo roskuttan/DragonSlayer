@@ -453,3 +453,19 @@ impl FrontApp {
         (pid != std::process::id()).then_some((name, pct))
     }
 }
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetCurrentThread() -> *mut c_void;
+    fn SetThreadPriority(thread: *mut c_void, priority: i32) -> i32;
+}
+
+/// Runs the calling thread at "highest" priority. For the fan-control loop:
+/// in a stress test with every CPU thread busy, a normal-priority loop got
+/// to run only every 30-150 s and couldn't steer the fan (2026-11-17). The
+/// loop sleeps most of the time, so this costs other programs nothing.
+pub fn raise_thread_priority() -> bool {
+    const THREAD_PRIORITY_HIGHEST: i32 = 2;
+    // SAFETY: changes only the current thread's priority.
+    unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) != 0 }
+}

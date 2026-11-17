@@ -268,6 +268,39 @@ the presets under a long game load (the load step ended at once at 87 °C).
 If Quiet is too slow for some use, the CPU reaches 73 °C and the curve
 speeds up by itself.
 
+## Stress test, Smart mode (2026-11-17)
+
+`research/stress-smart.ps1` ran busy loops in phases while the app logged
+every 5 s (Smart mode, *Cooler* preference, i5-10500H with 12 threads).
+Other apps were open, and from 12:42 an unrelated process loaded the CPU,
+so the cooldown numbers are mixed with other load.
+
+| Phase | CPU | Fan | What Smart did |
+|---|---|---|---|
+| Medium: 3 busy threads, 4 min | 92 °C for a moment at the start, then 73–80 °C | 2,400 → 6,000 RPM in about 60 s | full speed within 4 s of the load starting |
+| Heavy: all 12 threads, 5 min | steady 70–72 °C (the CPU's own power limit holds it there) | 6,000 RPM | **log rows only every 30–150 s**: the app's control loop was starved |
+| Bursts: 10 s on, 20 s off, ×8 | 92–94 °C at each burst start | full speed throughout | treated it as one long heavy load (safe, loud) |
+
+What came out of it:
+
+1. **The control loop must not starve.** It ran at normal priority, and with
+   every thread busy it got CPU time only every 30–150 s. Nothing went wrong,
+   because the fan was already at full speed and the controller's own curve
+   kept running, but Smart couldn't steer. The loop now runs at highest
+   thread priority.
+2. **Smart has to try slower speeds itself.** It only learns at speeds it
+   uses, and its starting guesses said anything slower than 100 % would be
+   too hot, so it never found out whether 80 % is nearly as cool. Now, after
+   2 minutes of steady load where even full speed misses the target, it
+   tries one step slower, keeps it if it is nearly as cool, and backs off
+   (and remembers) if it gets 4 °C hotter. In the simulator it moves from
+   100 % to 80 % at about 2 °C warmer.
+3. **The first spike is physics.** Load lifts the CPU 20 °C in about
+   3 seconds, while the fan needs a minute to go from idle to full. No fan
+   setting avoids the 92–94 °C moment at the start of a burst.
+
+To do: run it again with both fixes installed, on a quiet laptop.
+
 ## Sources
 
 - msi-ec driver: https://github.com/BeardOverflow/msi-ec (`msi-ec.c`, `CONF_G1_7`)

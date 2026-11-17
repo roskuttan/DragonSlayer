@@ -86,7 +86,9 @@ be shown on a screen.
   load starts, before the heat arrives, ignores spikes of a few seconds,
   keeps going after load ends until the stored heat is gone, and remembers
   which programs are heavy (by the CPU they use themselves) so it can spin
-  up the moment one comes to the front. A *Quieter / Balanced / Cooler*
+  up the moment one comes to the front. Under steady load it tries slower
+  speeds on its own and keeps the quietest one that is nearly as cool.
+  A *Quieter / Balanced / Cooler*
   choice shifts its aim. Everything it learns stays in
   `%APPDATA%\DragonSlayer`; *Forget* wipes it.
 - **Silent** and **Custom**: a 7-point curve editor with Quiet / Factory /
@@ -219,8 +221,9 @@ variables.
 | Windows-key lock | verified with an automatic test (`examples/winkey_check.rs`) |
 | Webcam switch | the bit changes, but this unit's camera doesn't appear in Windows either way |
 | Screen refresh switching | reads the screen's rates (48 / 144 Hz); switching itself not yet confirmed |
+| Stress test (`research/stress-smart.ps1`) | Smart went to full speed within 4 s of load starting; sustained full load held the CPU at 70–72 °C; two weaknesses found and fixed ([details](docs/how-dragon-center-works.md#stress-test-smart-mode-2026-11-17)) |
 
-`cargo test` runs 63 tests, including Smart mode against a simulated laptop
+`cargo test` runs 64 tests, including Smart mode against a simulated laptop
 built from the real measurements.
 
 ## Project layout

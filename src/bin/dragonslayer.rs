@@ -250,6 +250,8 @@ fn spawn_worker<B: EcBackend + 'static>(
     persist: bool,
 ) {
     std::thread::spawn(move || {
+        // it controls the fan: it must get CPU time even when everything is busy
+        sysinfo::raise_thread_priority();
         // (the demo starts like a fresh install: Smart mode on)
         let (mut settings, load_err) = if persist { Settings::load_checked() } else { (Settings::first_run(), None) };
         if persist && let Some(p) = Settings::path() {

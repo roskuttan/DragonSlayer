@@ -65,6 +65,11 @@ const FADE: f32 = 0.15;
 const APP_KNOWN_SECS: f32 = 300.0;
 const PRESPIN_SECS: f32 = 20.0;
 const MAX_APPS: usize = 40;
+/// Steady load for this long (and as long since the last try) before it
+/// tries one step slower to learn whether the extra speed buys anything.
+const PROBE_AFTER_SECS: f32 = 120.0;
+/// A slower try ends if it gets this much hotter than the speed above.
+const PROBE_MAX_RISE_C: f32 = 4.0;
 
 /// One reading, once a second.
 #[derive(Debug, Clone, Default)]
@@ -144,6 +149,11 @@ pub struct Brain {
     cool_secs: f32,
     panic_secs: f32,
     prespin: Option<(usize, f32, String)>,
+    /// trying one step slower: (load level, speed step)
+    probe: Option<(usize, usize)>,
+    probe_rest: f32,
+    level_secs: f32,
+    seen_level: usize,
     last_app: Option<String>,
 }
 
@@ -340,6 +350,52 @@ impl Brain {
             self.cool_secs = 0.0;
         }
         let mut step = (base + self.trim).min(STEPS - 1);
+
+        // Learning needs data at speeds it doesn't use. Under a steady load
+        // whose target even full speed can't reach (by the map), try one
+        // step slower. Kept if nearly as cool (the map's knee rule then
+        // settles there), dropped if it gets PROBE_MAX_RISE_C hotter. Real
+        // data, 2026-11-17 stress test: on Cooler it sat at 100 % for every
+        // sustained load and never found out whether 80 % would do.
+        if self.level != self.seen_level {
+            self.seen_level = self.level;
+            self.level_secs = 0.0;
+        }
+        self.level_secs += dt;
+        self.probe_rest += dt;
+        let est = self.estimates(level);
+        if let Some((pl, ps)) = self.probe {
+            let above = est[(ps + 1).min(STEPS - 1)];
+            let too_hot = heat > above + PROBE_MAX_RISE_C || heat >= 85.0;
+            if too_hot {
+                // remember that it was too hot, so it doesn't try again soon
+                let c = &mut self.map[pl][ps];
+                c.temp = c.temp.max(heat);
+                c.n = c.n.max(3);
+            }
+            if pl != level || too_hot || self.map[pl][ps].known() || self.prespin.is_some() || self.trim > 0 {
+                self.probe = None;
+                self.probe_rest = 0.0;
+            }
+        }
+        if self.probe.is_none()
+            && self.trim == 0
+            && self.prespin.is_none()
+            && raw == self.level
+            && level == self.level
+            && self.level_secs >= PROBE_AFTER_SECS
+            && self.probe_rest >= PROBE_AFTER_SECS
+            && step > 0
+            && !self.map[level][step - 1].known()
+            && est[STEPS - 1] > target - 1.0
+            && heat < 82.0
+        {
+            self.probe = Some((level, step - 1));
+        }
+        if let Some((_, ps)) = self.probe {
+            step = ps;
+        }
+
         // hard guards, whatever was learned
         self.panic_secs = if s.cpu_temp >= 92.0 { self.panic_secs + dt } else { 0.0 };
         let panic = self.panic_secs >= 3.0;
@@ -380,6 +436,8 @@ impl Brain {
             format!("{app} is usually heavy: spinning up early")
         } else if raw < self.level {
             "Load dropped: clearing the stored heat first".to_string()
+        } else if self.probe.is_some() {
+            format!("{} load is steady: trying {pct}% to learn if slower is enough", LOAD_NAMES[self.level])
         } else if step == STEPS - 1 && heat > target {
             format!("{} load, {heat:.0}°C: full speed, all the fan can do", LOAD_NAMES[self.level])
         } else if self.trim > 0 {
@@ -564,6 +622,30 @@ mod tests {
             run.go(600, 30.0, None);
         }
         assert!(cool.fan >= bal.fan, "Cooler {} % vs Balanced {} %", cool.fan, bal.fan);
+    }
+
+    #[test]
+    fn under_steady_load_it_finds_a_slower_speed_that_is_nearly_as_cool() {
+        // Seen in the stress test: on Cooler it sat at 100 % for every
+        // sustained load. In this model 100 % gives 73.9 C at medium load,
+        // 90 % 75.1, 80 % 76.4, 70 % 78.0: past 80 % the fan buys < 1.5 C.
+        let mut r = Run::new(Brain::default());
+        r.bias = -4.0;
+        r.go(120, 4.0, None);
+        r.go(60, 30.0, None);
+        assert_eq!(r.fan, 100, "at first it doesn't know better: full speed");
+        r.go(2400, 30.0, None);
+        assert!((70..=90).contains(&r.fan), "after 40 min it found a quieter speed: {} %", r.fan);
+        assert!(r.pc.chip < 77.5, "and stays nearly as cool: {:.1} C", r.pc.chip);
+        assert!(r.brain.map[2].iter().filter(|c| c.known()).count() >= 2, "it measured the speeds it tried");
+        // it never tries slower while the load is still changing
+        let mut quick = Run::new(Brain::default());
+        quick.bias = -4.0;
+        for _ in 0..8 {
+            quick.go(60, 30.0, None);
+            quick.go(40, 60.0, None);
+        }
+        assert!(quick.brain.probe.is_none());
     }
 
     #[test]

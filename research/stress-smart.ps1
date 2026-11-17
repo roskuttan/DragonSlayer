@@ -41,7 +41,7 @@ function Phase([string]$name, [int]$threads, [int]$secs) {
 }
 
 try {
-  if (-not (Test-Path $hist)) { throw "no history log at $hist: is DragonSlayer running?" }
+  if (-not (Test-Path $hist)) { throw "no history log at ${hist}: is DragonSlayer running?" }
   Phase 'idle' 0 120 | Out-Null
   Phase 'medium' 3 240 | Out-Null
   Phase 'heavy' $cores 300 | Out-Null
