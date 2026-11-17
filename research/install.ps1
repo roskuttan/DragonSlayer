@@ -1,6 +1,6 @@
 # Installs the release build to C:\Program Files\DragonSlayer (admin-only
 # folder, so the no-prompt "DragonSlayer Open" task is safe), points the
-# desktop shortcut and taskbar pin at it, and tests a plain click:
+# existing shortcuts and taskbar pin at it, and tests a plain click:
 #   1. app not running -> starts through the task, no UAC prompt
 #   2. app running     -> a second click only brings it forward (one copy)
 # Run from a normal PowerShell: asks for admin once. Rebuild first:
@@ -34,12 +34,12 @@ foreach ($f in @('target\release\dragonslayer.exe', 'target\release\dragonslayer
   L "copied $f"
 }
 
-# shortcuts: desktop + the taskbar pin from the MSI Control days
+# shortcuts: only re-point ones that already exist (desktop, taskbar pins)
 $sh = New-Object -ComObject WScript.Shell
 $desk = [Environment]::GetFolderPath('Desktop')
 $links = @((Join-Path $desk 'DragonSlayer.lnk'), "$env:APPDATA\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\MSI Control.lnk", "$env:APPDATA\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\DragonSlayer.lnk")
 foreach ($lnk in $links) {
-  if (-not (Test-Path -LiteralPath $lnk) -and $lnk -notlike '*Desktop*') { continue }
+  if (-not (Test-Path -LiteralPath $lnk)) { continue }   # never create one: the user does not want a desktop shortcut
   $l = $sh.CreateShortcut($lnk); $l.TargetPath = $exe; $l.WorkingDirectory = $dest; $l.IconLocation = "$exe,0"; $l.Description = 'DragonSlayer'; $l.Save()
   L "shortcut -> installed exe: $lnk"
 }
