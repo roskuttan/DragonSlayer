@@ -26,7 +26,7 @@ use dragonslayer::ec::map::{ChargeLimit, FanCurve, FanMode, KbdBacklight, CURVE_
 use dragonslayer::ec::open_hardware;
 use dragonslayer::power::{self, Level};
 use dragonslayer::settings::{HEAT_LIMITS, Refresh, Settings};
-use dragonslayer::{display, smart, sysinfo, winkey};
+use dragonslayer::{display, history, smart, sysinfo, winkey};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
@@ -291,6 +291,8 @@ fn spawn_worker<B: EcBackend + 'static>(
         };
         let (mut cpu_load, mut gpu_load) = (0.0f32, 0.0f32);
         let mut last_tick = Instant::now();
+        // history log (real runs only; the demo writes nothing)
+        let mut log = if persist { Settings::path().map(|p| history::Log::new(p.with_file_name("history"))) } else { None };
         let mut switcher = display::Switcher::default();
         let screen_rates = if persist { display::rates() } else { vec![48, 144] };
         let mut tick: u32 = 0;
@@ -405,6 +407,30 @@ fn spawn_worker<B: EcBackend + 'static>(
                     save_brain(&brain);
                     brain_saved = Instant::now();
                 }
+            }
+
+            // history: one row every few seconds, to compare modes and tune later
+            if tick.is_multiple_of(history::EVERY_SECS)
+                && let (Some(log), Ok(st)) = (&mut log, &status)
+            {
+                let mode = match st.fan_mode {
+                    _ if settings.smart => "smart",
+                    Ok(FanMode::Silent) => "silent",
+                    Ok(FanMode::Advanced) => "custom",
+                    _ => "auto",
+                };
+                log.append(&history::Row {
+                    mode,
+                    cpu_c: st.cpu_temp_c,
+                    gpu_c: st.gpu_temp_c,
+                    cpu_load,
+                    gpu_load,
+                    fan_target_pct: st.cpu_fan_pct.max(st.gpu_fan_pct),
+                    rpm: st.fan_rpm,
+                    on_battery: power.is_some_and(|p| !p.0),
+                    boost: st.cooler_boost,
+                    smart: decision.as_ref().map(|d| (d.fan_pct, d.load_level)),
+                });
             }
 
             // screen refresh rate by situation

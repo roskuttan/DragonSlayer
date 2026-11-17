@@ -8,6 +8,7 @@ pub mod controller;
 #[cfg(windows)]
 pub mod display;
 pub mod ec;
+pub mod history;
 #[cfg(windows)]
 pub mod elevation;
 pub mod icon;

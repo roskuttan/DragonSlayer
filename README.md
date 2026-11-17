@@ -36,6 +36,11 @@ More: [Fans](docs/demo-fans.png) · [Tools](docs/demo-tools.png) ·
   shows what it is doing and why, and the learned map. A Quieter / Balanced
   / Cooler choice shifts its target. Learned data: `%APPDATA%\DragonSlayer\
   learned.txt` (program names stay on this PC; "Forget" wipes it).
+- **History log**: every 5 seconds one line (temperatures, CPU and GPU
+  load, fan target, RPM, mode, battery, Smart's decision) goes to
+  `%APPDATA%\DragonSlayer\history\<day>.csv`: about 1 MB a day, newest 14
+  days kept, no program names, nothing leaves the PC. It is there to
+  compare fan modes and tune Smart mode from real use.
 - **Screen refresh** (Automation tab): Off / Battery (slow rate on battery,
   fast plugged in) / Adaptive (also fast on battery while the graphics chip
   is busy, i.e. a game). This panel offers 48 and 144 Hz only and has no
@@ -98,7 +103,7 @@ fan auto|silent | curve quiet|cool|max|38,43,48,54,60,70,85 | webcam on|off |
 boost on|off | charge 60 | kbd 0-3 | power [plan name]` (add
 `--backend pawnio` and run from an admin terminal to use PawnIO).
 
-Tests: `cargo test` (56 tests; Smart mode runs against a simulated laptop).
+Tests: `cargo test` (59 tests; Smart mode runs against a simulated laptop).
 Windows-key lock check without touching the keyboard:
 `cargo run --release --example winkey_check`.
 
@@ -179,6 +184,7 @@ src/settings.rs      saved settings, re-applied on start
 src/automation.rs    heat protection, on-battery profile (unit-tested)
 src/smart.rs         Smart fan mode: the learning brain (pure logic, simulated-laptop tests)
 src/display.rs       screen refresh rates and when to switch
+src/history.rs       history log (one CSV a day)
 src/power.rs         Windows power plans
 src/winkey.rs        Windows-key lock (keyboard hook)
 src/sysinfo.rs       CPU / RAM / GPU / battery health / camera check
