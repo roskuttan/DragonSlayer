@@ -148,10 +148,24 @@ the output of `dragonslayer-cli status` is very welcome.
 
 ## Install
 
-You need:
-1. **[PawnIO](https://github.com/namazso/PawnIO)** installed (the signed
-   driver DragonSlayer talks to the hardware through).
-2. To build: Rust (stable, MSVC toolchain) and the Windows SDK (for `rc.exe`).
+### Download (easiest)
+
+1. Install **[PawnIO](https://github.com/namazso/PawnIO/releases)**, the
+   signed driver DragonSlayer talks to the hardware through.
+2. Download the zip from **[Releases](https://github.com/roskuttan/DragonSlayer/releases/latest)**
+   and unzip it.
+3. Double-click **`Install.cmd`** and click **Yes** on the admin prompt.
+
+It copies the app to `C:\Program Files\DragonSlayer`, adds a Start menu
+entry and starts it; after that it opens without any admin prompt.
+`Uninstall.cmd` removes it again and gives the fan back to the laptop's own
+curve. The exe isn't code-signed, so Windows SmartScreen may warn about an
+unknown publisher (**More info → Run anyway**), or build it yourself:
+
+### Build from source
+
+You need [PawnIO](https://github.com/namazso/PawnIO) installed, Rust
+(stable, MSVC toolchain) and the Windows SDK (for `rc.exe`).
 
 ```powershell
 git clone https://github.com/roskuttan/DragonSlayer
@@ -246,7 +260,8 @@ src/display.rs            screen refresh rates
 src/power.rs, sysinfo.rs  power plans, CPU / GPU / battery readings
 src/autostart.rs, elevation.rs   Task Scheduler tasks, admin rights without a prompt
 docs/                     reverse-engineering notes, screenshots
-research/                 install, measurement, stress-test, screenshot and GIF scripts, raw data
+release/                  installer and uninstaller that ship in the download zip
+research/                 install, release build, measurement, stress-test, screenshot and GIF scripts, raw data
 vendor/pawnio/            PawnIO's signed LpcACPIEC module (LGPL-2.1)
 ```
 
