@@ -1,0 +1,102 @@
+﻿elevated: True
+> msi-control --backend pawnio status  (exit 0)
+  [LIVE via PawnIO]
+  EC firmware   : 16R5EMS1.102 (verified)
+  CPU           : 75 C, fan 60%
+  GPU           : 65 C, fan 48%
+  Shift mode    : not set (raw 0x80)
+  Fan mode      : Auto
+  Cooler Boost  : off
+  Battery limit : stop at 100%
+  Keyboard light: level 0/3
+  Webcam        : off
+  Fn/Win swap   : swapped
+  Writes        : enabled
+> msi-control --backend pawnio dump  (exit 0)
+  [LIVE via PawnIO]
+  EC firmware: 16R5EMS1.102
+  
+       00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F
+  00:  00 80 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................
+  10:  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................
+  20:  00 00 00 00 00 00 00 00 00 00 00 80 C0 07 49 0B  ..............I.
+  30:  03 09 00 0D 50 0A 05 00 94 11 88 2C C2 01 E0 02  ....P......,....
+  40:  00 00 64 00 20 01 00 00 20 01 92 31 34 0C 00 00  ..d........14...
+  50:  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................
+  60:  00 00 00 00 00 00 00 00 4B 00 37 40 49 4C 52 58  ........K.7@ILRX
+  70:  64 3C 26 2B 30 36 3C 46 55 00 08 03 03 03 03 03  d<&+06<FU.......
+  80:  41 00 37 3D 43 49 4F 55 63 30 26 2B 30 36 3C 46  A.7=CIOUc0&+06<F
+  90:  55 00 08 03 03 03 03 03 02 00 64 02 00 64 00 00  U.........d..d..
+  A0:  31 36 52 35 45 4D 53 31 2E 31 30 32 30 33 31 31  16R5EMS1.1020311
+  B0:  32 30 32 31 31 37 3A 31 30 3A 32 34 20 01 40 28  202117:10:24..@(
+  C0:  00 01 23 00 00 9E C1 00 00 8B 00 00 00 97 14 00  ..#.............
+  D0:  00 00 00 00 70 00 D1 00 00 00 00 00 00 1A 0B 10  ....p...........
+  E0:  E2 02 00 2C 10 00 00 00 00 00 00 00 00 D1 00 E4  ...,............
+  F0:  00 00 80 80 0D 00 05 00 00 00 00 00 00 00 00 00  ................
+> msi-control --backend winio dump  (exit 0)
+  [LIVE via MSI driver (WinIO)]
+  EC firmware: 16R5EMS1.102
+  
+       00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F
+  00:  00 80 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................
+  10:  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................
+  20:  00 00 00 00 00 00 00 00 00 00 00 80 C0 07 49 0B  ..............I.
+  30:  03 09 00 0D 50 0A 05 00 94 11 88 2C C2 01 E0 02  ....P......,....
+  40:  00 00 64 00 20 01 00 00 20 01 92 31 34 0C 00 00  ..d........14...
+  50:  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................
+  60:  00 00 00 00 00 00 00 00 4B 00 37 40 49 4C 52 58  ........K.7@ILRX
+  70:  64 3C 26 2B 30 36 3C 46 55 00 08 03 03 03 03 03  d<&+06<FU.......
+  80:  41 00 37 3D 43 49 4F 55 63 30 26 2B 30 36 3C 46  A.7=CIOUc0&+06<F
+  90:  55 00 08 03 03 03 03 03 02 00 64 02 00 64 00 00  U.........d..d..
+  A0:  31 36 52 35 45 4D 53 31 2E 31 30 32 30 33 31 31  16R5EMS1.1020311
+  B0:  32 30 32 31 31 37 3A 31 30 3A 32 34 20 01 40 28  202117:10:24..@(
+  C0:  00 01 23 00 00 9E C1 00 00 8B 00 00 00 98 14 00  ..#.............
+  D0:  00 00 00 00 70 00 D1 00 00 00 00 00 00 1A 0B 10  ....p...........
+  E0:  E2 02 00 2C 10 00 00 00 00 00 00 00 00 D1 00 E4  ...,............
+  F0:  00 00 80 80 0D 00 05 00 00 00 00 00 00 00 00 00  ................
+compare A0:  same=True
+compare B0:  same=True
+compare F0:  same=True
+compare 90:  same=True
+compare E0:  same=True
+20 status runs: 381 ms
+> msi-control --backend pawnio kbd 2  (exit 0)
+  [LIVE via PawnIO]
+  EC firmware   : 16R5EMS1.102 (verified)
+  CPU           : 75 C, fan 60%
+  GPU           : 65 C, fan 48%
+  Shift mode    : not set (raw 0x80)
+  Fan mode      : Auto
+  Cooler Boost  : off
+  Battery limit : stop at 100%
+  Keyboard light: level 2/3
+  Webcam        : off
+  Fn/Win swap   : swapped
+  Writes        : enabled
+> msi-control --backend winio status  (exit 0)
+  [LIVE via MSI driver (WinIO)]
+  EC firmware   : 16R5EMS1.102 (verified)
+  CPU           : 81 C, fan 54%
+  GPU           : 65 C, fan 48%
+  Shift mode    : not set (raw 0x80)
+  Fan mode      : Auto
+  Cooler Boost  : off
+  Battery limit : stop at 100%
+  Keyboard light: level 2/3
+  Webcam        : off
+  Fn/Win swap   : swapped
+  Writes        : enabled
+cross-check via MSI driver: Keyboard light: level 2/3
+> msi-control --backend pawnio kbd 0  (exit 0)
+  [LIVE via PawnIO]
+  EC firmware   : 16R5EMS1.102 (verified)
+  CPU           : 81 C, fan 54%
+  GPU           : 65 C, fan 48%
+  Shift mode    : not set (raw 0x80)
+  Fan mode      : Auto
+  Cooler Boost  : off
+  Battery limit : stop at 100%
+  Keyboard light: level 0/3
+  Webcam        : off
+  Fn/Win swap   : swapped
+  Writes        : enabled

@@ -1,0 +1,29 @@
+[package]
+name = "dragonslayer"
+version = "0.1.0"
+edition = "2024"
+# both exes are declared below (the CLI would otherwise take the package name)
+autobins = false
+
+# The app. Its exe requires admin (manifest), so cargo can't launch a test build of it.
+[[bin]]
+name = "dragonslayer"
+path = "src/bin/dragonslayer.rs"
+test = false
+
+# Command-line tool.
+[[bin]]
+name = "dragonslayer-cli"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "glow"] }
+tray-icon = "0.26.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[build-dependencies]
+winresource = "0.1.34"
