@@ -27,7 +27,8 @@ More: [Fans](docs/demo-fans.png) · [Tools](docs/demo-tools.png) ·
   factory curve back. The presets are tuned from a measurement of this
   laptop (see "Fan measurement" in docs/how-dragon-center-works.md).
 - **Smart fan mode** (Fan tab, or Cooling → Smart): the app sets the fan
-  itself and keeps learning. It learns a map of this laptop (the
+  itself and keeps learning (switching it on turns Cooler Boost off).
+  It learns a map of this laptop (the
   temperature each fan speed gives at each load level) and never stops
   updating it, so it follows dust, room temperature and ageing. It acts on
   load before the heat arrives, ignores short spikes, keeps going after

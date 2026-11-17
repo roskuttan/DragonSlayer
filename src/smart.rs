@@ -17,8 +17,8 @@
 //!
 //! Pure logic (no hardware, no clock), so it is tested against a simulated
 //! laptop. The caller feeds one `Sample` a second and writes `curve_for`
-//! the returned speed. That curve keeps the Quiet preset's ramp at the hot
-//! end, so a frozen app can never leave the fan slow on a hot laptop.
+//! the returned speed. That curve keeps the factory floor at the two hottest
+//! points, so a frozen app can never leave the fan slow on a hot laptop.
 
 use std::collections::HashMap;
 
@@ -147,14 +147,19 @@ fn level_of(load_index: f32) -> usize {
     LOAD_EDGES.iter().position(|&e| load_index < e).unwrap_or(LOADS - 1)
 }
 
-/// The curve to write for a Smart speed: that speed up to 73 C, then never
-/// below the Quiet preset's ramp (45, 58 %) and the factory floor (70, 85 %).
+/// The curve to write for a Smart speed: that speed everywhere, except the
+/// two hottest points (82 C, 88 C), which keep the factory floor (70, 85 %).
+/// So a frozen app can never leave the fan slow on a hot laptop.
+///
+/// Not an earlier ramp: the first version also stepped up at 73 and 76 C,
+/// and on the real laptop the CPU touches 77-81 C for a second even at
+/// idle, so the fan wobbled between 1,800 and 2,700 RPM (history log,
+/// 2026-11-17). Ignoring such spikes is the brain's job, not the curve's.
 pub fn curve_for(pct: u8) -> FanCurve {
     let p = pct.clamp(FanCurve::MIN_PCT, FanCurve::MAX_PCT);
-    let q = FanCurve::QUIET.speeds();
     let mut s = [p; 7];
-    for i in 3..7 {
-        s[i] = p.max(q[i]);
+    for (i, v) in s.iter_mut().enumerate() {
+        *v = p.max(FanCurve::floor(i));
     }
     FanCurve::new(s).unwrap_or(FanCurve::FACTORY)
 }
@@ -629,10 +634,10 @@ mod tests {
         for pct in 0..=120u8 {
             let c = curve_for(pct).speeds();
             assert!(FanCurve::new(c).is_some(), "{pct}: {c:?}");
-            let q = FanCurve::QUIET.speeds();
-            assert!((3..7).all(|i| c[i] >= q[i]), "{pct}: never below Quiet's ramp when hot");
+            let fl = FanCurve::FACTORY.speeds();
+            assert!((5..7).all(|i| c[i] >= fl[i]), "{pct}: never below the factory floor when hot");
         }
-        assert_eq!(curve_for(30).speeds(), [30, 30, 30, 45, 58, 70, 85]);
+        assert_eq!(curve_for(30).speeds(), [30, 30, 30, 30, 30, 70, 85], "no steps below 82 C: spikes must not move the fan");
         assert_eq!(curve_for(90).speeds(), [90; 7]);
     }
 

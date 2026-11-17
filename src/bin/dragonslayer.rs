@@ -627,7 +627,13 @@ fn apply<B: EcBackend>(ctl: &mut Controller<B>, cmd: Cmd, settings: &mut Setting
         }
         Cmd::Smart(on) => {
             let res = if on {
-                r(ctl.set_fan_profile(FanMode::Advanced, Some(smart::curve_for(50))))
+                // Cooler Boost overrides any curve: Smart can't steer with
+                // it left on (e.g. after the Extreme scenario)
+                let boost_off = r(ctl.set_cooler_boost(false));
+                if boost_off.is_ok() {
+                    settings.boost = Some(false);
+                }
+                boost_off.and_then(|()| r(ctl.set_fan_profile(FanMode::Advanced, Some(smart::curve_for(50)))))
             } else {
                 // back to what the user had before
                 r(ctl.set_fan_profile(settings.fan.unwrap_or(FanMode::Auto), settings.curve))
