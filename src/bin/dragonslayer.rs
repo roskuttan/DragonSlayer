@@ -243,7 +243,25 @@ fn spawn_worker<B: EcBackend + 'static>(
     persist: bool,
 ) {
     std::thread::spawn(move || {
-        let mut settings = if persist { Settings::load() } else { Settings::default() };
+        let (mut settings, load_err) = if persist { Settings::load_checked() } else { (Settings::default(), None) };
+        if persist && let Some(p) = Settings::path() {
+            // start report: did reading and writing the settings folder work?
+            // (readable without admin rights, for finding problems later)
+            let wrote = Settings::write_file(&p.with_file_name("write-test.txt"), "ok");
+            let report = format!(
+                "settings read: {}\nsettings folder write: {}\nsmart={} fan={:?} heat_protect={}\n",
+                load_err.as_deref().unwrap_or("ok"),
+                wrote.as_ref().map_or_else(|e| e.to_string(), |()| "ok".into()),
+                settings.smart,
+                settings.fan,
+                settings.heat_protect
+            );
+            let _ = std::fs::remove_file(p.with_file_name("write-test.txt"));
+            let _ = std::fs::write(p.with_file_name("last-start.txt"), report);
+        }
+        if let Some(e) = &load_err {
+            shared.lock().unwrap().message = Some((format!("Couldn't read your saved settings ({e})"), false, Instant::now()));
+        }
         shared.lock().unwrap().settings = settings.clone();
         let mut cpu = sysinfo::CpuMeter::default();
         cpu.sample();
@@ -286,7 +304,7 @@ fn spawn_worker<B: EcBackend + 'static>(
         let mut brain_saved = Instant::now();
         let save_brain = |b: &smart::Brain| {
             if let Some(p) = &learned_path {
-                let _ = std::fs::write(p, b.to_text());
+                let _ = Settings::write_file(p, &b.to_text());
             }
         };
         let (mut cpu_load, mut gpu_load) = (0.0f32, 0.0f32);
@@ -309,12 +327,12 @@ fn spawn_worker<B: EcBackend + 'static>(
                     if persist && was != Refresh::Off && settings.refresh == Refresh::Off && let Some(&fast) = screen_rates.last() {
                         let _ = display::set_hz(fast);
                     }
-                    if result.is_ok() && persist {
-                        let _ = settings.save();
-                    }
-                    let msg = match result {
-                        Ok(()) => (what, true, Instant::now()),
-                        Err(e) => (format!("{what} failed: {e}"), false, Instant::now()),
+                    // a choice that can't be saved must not look saved
+                    let saved = if result.is_ok() && persist { settings.save() } else { Ok(()) };
+                    let msg = match (result, saved) {
+                        (Ok(()), Ok(())) => (what, true, Instant::now()),
+                        (Ok(()), Err(e)) => (format!("{what}, but it could not be saved: {e}"), false, Instant::now()),
+                        (Err(e), _) => (format!("{what} failed: {e}"), false, Instant::now()),
                     };
                     let mut s = shared.lock().unwrap();
                     s.settings = settings.clone();

@@ -202,18 +202,46 @@ impl Settings {
     }
 
     pub fn load() -> Self {
-        Self::path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .map(|t| Self::parse(&t))
-            .unwrap_or_default()
+        Self::load_checked().0
+    }
+
+    /// The saved settings, plus the error if the file exists but couldn't
+    /// be read (then the defaults are returned, and the caller should say so
+    /// instead of silently behaving as if nothing had ever been set).
+    pub fn load_checked() -> (Self, Option<String>) {
+        let Some(p) = Self::path() else { return (Self::default(), None) };
+        match std::fs::read_to_string(&p) {
+            Ok(t) => (Self::parse(&t), None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Self::default(), None),
+            Err(e) => (Self::default(), Some(format!("{}: {e}", p.display()))),
+        }
     }
 
     pub fn save(&self) -> std::io::Result<()> {
         let Some(p) = Self::path() else { return Ok(()) };
+        Self::write_file(&p, &self.to_text())
+    }
+
+    /// Writes a fresh file next to `p` and puts it in `p`'s place. Not a
+    /// plain overwrite: on this PC the Roaming folder is flagged "encrypted",
+    /// and the copy of the app that Task Scheduler starts could not write
+    /// into a settings file that carried that flag, although it can create
+    /// and replace files (seen 2026-11-17: choices silently not saved).
+    pub fn write_file(p: &Path, text: &str) -> std::io::Result<()> {
         if let Some(dir) = p.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(p, self.to_text())
+        let tmp = p.with_extension("new");
+        std::fs::write(&tmp, text)?;
+        if std::fs::rename(&tmp, p).is_ok() {
+            return Ok(());
+        }
+        // replace refused: remove the old file, then move the new one in
+        let _ = std::fs::remove_file(p);
+        std::fs::rename(&tmp, p).or_else(|_| {
+            let _ = std::fs::remove_file(&tmp);
+            std::fs::write(p, text)
+        })
     }
 
     /// True if no hardware setting has been chosen yet.
@@ -253,6 +281,32 @@ mod tests {
     use super::*;
     use crate::ec::backend::MockEc;
     use crate::ec::map;
+
+    #[test]
+    fn write_file_replaces_and_survives_a_read_only_old_file() {
+        let dir = std::env::temp_dir().join(format!("ds-write-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let p = dir.join("sub").join("settings.txt");
+        Settings::write_file(&p, "a=1
+").unwrap();
+        Settings::write_file(&p, "a=2
+").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "a=2
+");
+        assert!(!p.with_extension("new").exists(), "no temp file left behind");
+        // an old file that refuses to be written into still gets replaced
+        let mut perm = std::fs::metadata(&p).unwrap().permissions();
+        perm.set_readonly(true);
+        std::fs::set_permissions(&p, perm).unwrap();
+        assert!(std::fs::write(&p, "x").is_err(), "plain overwrite is refused");
+        let _ = Settings::write_file(&p, "a=3
+");
+        let now = std::fs::read_to_string(&p).unwrap();
+        assert!(now == "a=3
+" || now == "a=2
+", "never a damaged file: {now:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn settings_move_over_from_the_old_name() {
