@@ -66,6 +66,11 @@ RPM, automatic heat protection, a battery-health report and a history log.
 
 ## Screenshots
 
+<p align="center">
+  <img src="docs/demo-live.gif" width="640" alt="Dashboard: the fan spinning in step with its RPM, gauges pulsing">
+  <br><sub>The Dashboard live: the fan turns in step with its real RPM (in 60× slow motion) and the gauges pulse with the temperature.</sub>
+</p>
+
 | | |
 |---|---|
 | **Smart fan mode**: what it is doing and why, and the map it has learned<br><img src="docs/demo-fans.png" alt="Smart fan mode"> | **Curve editor**: drag 7 bars or pick a preset; hover shows the RPM<br><img src="docs/demo-fans-custom.png" alt="Fan curve editor"> |
@@ -241,7 +246,7 @@ src/display.rs            screen refresh rates
 src/power.rs, sysinfo.rs  power plans, CPU / GPU / battery readings
 src/autostart.rs, elevation.rs   Task Scheduler tasks, admin rights without a prompt
 docs/                     reverse-engineering notes, screenshots
-research/                 install, measurement, stress-test and screenshot scripts, raw data
+research/                 install, measurement, stress-test, screenshot and GIF scripts, raw data
 vendor/pawnio/            PawnIO's signed LpcACPIEC module (LGPL-2.1)
 ```
 
